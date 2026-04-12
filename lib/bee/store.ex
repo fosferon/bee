@@ -467,6 +467,29 @@ defmodule Bee.Store do
         end
       end)
 
+    # Label filtering via EXISTS subquery on issue_labels junction table.
+    # Accepts a single label string or a list (AND — issue must have ALL).
+    {clauses, params} =
+      case Keyword.get(opts, :labels) do
+        nil ->
+          {clauses, params}
+
+        label when is_binary(label) ->
+          clause = "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = issues.id AND il.label = ?)"
+          {[clause | clauses], [label | params]}
+
+        labels when is_list(labels) and labels != [] ->
+          label_clauses =
+            Enum.map(labels, fn _label ->
+              "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = issues.id AND il.label = ?)"
+            end)
+
+          {Enum.reverse(label_clauses) ++ clauses, Enum.reverse(labels) ++ params}
+
+        _ ->
+          {clauses, params}
+      end
+
     if clauses == [] do
       {"", []}
     else
