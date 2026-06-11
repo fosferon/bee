@@ -158,8 +158,15 @@ defmodule Bee.Store do
     end
   end
 
-  @spec update_issue(Exqlite.Sqlite3.db(), String.t(), map()) :: :ok
+  @spec update_issue(Exqlite.Sqlite3.db(), String.t(), map()) :: :ok | {:error, :not_found}
   def update_issue(conn, id, attrs) do
+    case get_issue(conn, id) do
+      {:ok, _issue} -> do_update_issue(conn, id, attrs)
+      {:error, :not_found} -> {:error, :not_found}
+    end
+  end
+
+  defp do_update_issue(conn, id, attrs) do
     sets = []
     vals = []
 
@@ -167,8 +174,10 @@ defmodule Bee.Store do
     {sets, vals} = maybe_set(sets, vals, attrs, :description)
     {sets, vals} = maybe_set(sets, vals, attrs, :status)
     {sets, vals} = maybe_set(sets, vals, attrs, :priority)
+    {sets, vals} = maybe_set(sets, vals, attrs, :issue_type)
     {sets, vals} = maybe_set(sets, vals, attrs, :assigned_to)
     {sets, vals} = maybe_set(sets, vals, attrs, :project_id)
+    {sets, vals} = maybe_set(sets, vals, attrs, :parent)
     {sets, vals} = maybe_set(sets, vals, attrs, :close_reason)
 
     {sets, vals} =
@@ -196,6 +205,23 @@ defmodule Bee.Store do
       end
 
       :ok
+    end
+  end
+
+  @spec issue_parent(Exqlite.Sqlite3.db(), String.t()) ::
+          {:ok, String.t() | nil} | {:error, :not_found}
+  def issue_parent(conn, id) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT parent FROM issues WHERE id = ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, [id])
+
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [parent]} ->
+        Exqlite.Sqlite3.release(conn, stmt)
+        {:ok, parent}
+
+      :done ->
+        Exqlite.Sqlite3.release(conn, stmt)
+        {:error, :not_found}
     end
   end
 
@@ -475,7 +501,9 @@ defmodule Bee.Store do
           {clauses, params}
 
         label when is_binary(label) ->
-          clause = "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = issues.id AND il.label = ?)"
+          clause =
+            "EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = issues.id AND il.label = ?)"
+
           {[clause | clauses], [label | params]}
 
         labels when is_list(labels) and labels != [] ->
@@ -493,8 +521,7 @@ defmodule Bee.Store do
     if clauses == [] do
       {"", []}
     else
-      {" WHERE " <> (clauses |> Enum.reverse() |> Enum.join(" AND ")),
-       Enum.reverse(params)}
+      {" WHERE " <> (clauses |> Enum.reverse() |> Enum.join(" AND ")), Enum.reverse(params)}
     end
   end
 

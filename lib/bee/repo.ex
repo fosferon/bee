@@ -55,6 +55,7 @@ defmodule Bee.Repo do
       title: title,
       description: Keyword.get(opts, :description),
       priority: Keyword.get(opts, :priority),
+      issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
       labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
       parent: format_parent(Keyword.get(opts, :parent), state.prefix),
       project_id: Keyword.get(opts, :project_id),
@@ -93,9 +94,14 @@ defmodule Bee.Repo do
 
   def handle_call({:update, id, attrs}, _from, state) do
     full = resolve_id(id, state.prefix)
-    Bee.Store.update_issue(state.conn, full, attrs)
-    maybe_export(state)
-    {:reply, :ok, state}
+
+    with {:ok, normalized_attrs} <- normalize_update_attrs(attrs, full, state),
+         :ok <- Bee.Store.update_issue(state.conn, full, normalized_attrs) do
+      maybe_export(state)
+      {:reply, :ok, state}
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
 
   def handle_call({:comment, id, text, opts}, _from, state) do
@@ -250,10 +256,66 @@ defmodule Bee.Repo do
   defp resolve_id(id, _prefix), do: to_string(id)
 
   defp format_parent(nil, _prefix), do: nil
+  defp format_parent("", _prefix), do: nil
   defp format_parent(parent, prefix) when is_integer(parent), do: "#{prefix}-#{parent}"
 
   defp format_parent(parent, prefix) when is_binary(parent) do
     if String.contains?(parent, "-"), do: parent, else: "#{prefix}-#{parent}"
+  end
+
+  defp normalize_update_attrs(attrs, issue_id, state) do
+    attrs = Map.new(attrs)
+
+    attrs =
+      case {Map.fetch(attrs, :type), Map.has_key?(attrs, :issue_type)} do
+        {{:ok, type}, false} -> attrs |> Map.delete(:type) |> Map.put(:issue_type, type)
+        _ -> Map.delete(attrs, :type)
+      end
+
+    attrs =
+      if Map.has_key?(attrs, :parent) do
+        Map.update!(attrs, :parent, &format_parent(&1, state.prefix))
+      else
+        attrs
+      end
+
+    case validate_parent_update(attrs, issue_id, state.conn) do
+      :ok -> {:ok, attrs}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_parent_update(attrs, issue_id, conn) do
+    case Map.fetch(attrs, :parent) do
+      {:ok, ^issue_id} ->
+        {:error, :self_parent}
+
+      {:ok, parent} when is_binary(parent) ->
+        if parent_cycle?(conn, parent, issue_id) do
+          {:error, :parent_cycle}
+        else
+          :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp parent_cycle?(conn, current_parent, target_id) do
+    case Bee.Store.issue_parent(conn, current_parent) do
+      {:ok, ^target_id} ->
+        true
+
+      {:ok, nil} ->
+        false
+
+      {:ok, next_parent} when is_binary(next_parent) ->
+        parent_cycle?(conn, next_parent, target_id)
+
+      _ ->
+        false
+    end
   end
 
   defp label_list(nil), do: []

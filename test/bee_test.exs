@@ -54,6 +54,46 @@ defmodule BeeTest do
     assert issue.status == "closed"
   end
 
+  test "create and update issue type", %{server: s} do
+    {:ok, issue} = Bee.create("Epic", [type: "epic"], s)
+    assert issue.issue_type == "epic"
+
+    :ok = Bee.update(1, %{issue_type: "objective"}, s)
+    {:ok, updated} = Bee.get(1, s)
+    assert updated.issue_type == "objective"
+
+    :ok = Bee.update(1, %{type: "bug"}, s)
+    {:ok, aliased} = Bee.get(1, s)
+    assert aliased.issue_type == "bug"
+  end
+
+  test "update issue parent and clear parent", %{server: s} do
+    {:ok, parent} = Bee.create("Parent", [], s)
+    {:ok, child} = Bee.create("Child", [], s)
+
+    assert is_nil(child.parent)
+
+    :ok = Bee.update(child.id, %{parent: parent.id}, s)
+    {:ok, reparented} = Bee.get(child.id, s)
+    assert reparented.parent == parent.id
+
+    :ok = Bee.update(child.id, %{parent: nil}, s)
+    {:ok, cleared} = Bee.get(child.id, s)
+    assert is_nil(cleared.parent)
+  end
+
+  test "reject parent cycles", %{server: s} do
+    {:ok, parent} = Bee.create("Parent", [], s)
+    {:ok, child} = Bee.create("Child", [parent: parent.id], s)
+
+    assert {:error, :self_parent} = Bee.update(parent.id, %{parent: parent.id}, s)
+    assert {:error, :parent_cycle} = Bee.update(parent.id, %{parent: child.id}, s)
+  end
+
+  test "updating missing issue returns not found", %{server: s} do
+    assert {:error, :not_found} = Bee.update(999, %{title: "Missing"}, s)
+  end
+
   test "comment on issue", %{server: s} do
     {:ok, _} = Bee.create("With comments", [], s)
     :ok = Bee.comment(1, "First comment", [author: "tester"], s)
@@ -136,7 +176,8 @@ defmodule BeeTest do
     {:ok, _} = Bee.create("Exported issue", [labels: ["test"]], s)
     :ok = Bee.comment(1, "A comment", [author: "bot"], s)
 
-    export_path = Path.join(System.tmp_dir!(), "bee_export_test_#{:erlang.unique_integer([:positive])}.jsonl")
+    export_path =
+      Path.join(System.tmp_dir!(), "bee_export_test_#{:erlang.unique_integer([:positive])}.jsonl")
 
     conn = GenServer.call(s, :conn)
     :ok = Bee.Export.export(conn, export_path)
