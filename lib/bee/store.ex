@@ -1,6 +1,9 @@
 defmodule Bee.Store do
   @moduledoc false
 
+  @order_columns ~w(created_at updated_at priority id)a
+  @order_directions [:asc, :desc]
+
   @spec init_schema(Exqlite.Sqlite3.db()) :: :ok
   def init_schema(conn) do
     Exqlite.Sqlite3.execute(conn, "PRAGMA journal_mode=WAL")
@@ -199,26 +202,140 @@ defmodule Bee.Store do
     end
   end
 
+  @doc """
+  Validates pagination opts (:order_by, :limit, :offset).
+  Raises ArgumentError on invalid input. Called from the public API before
+  dispatching to GenServer so errors surface in the caller's process.
+  """
+  @spec validate_opts!(keyword()) :: :ok
+  def validate_opts!(opts) do
+    validate_order_by!(Keyword.get(opts, :order_by))
+    validate_limit!(Keyword.get(opts, :limit))
+    validate_offset!(Keyword.get(opts, :offset))
+    :ok
+  end
+
+  defp validate_order_by!(nil), do: :ok
+
+  defp validate_order_by!(order_by) when is_list(order_by) do
+    Enum.each(order_by, fn
+      {col, dir} when col in @order_columns and dir in @order_directions ->
+        :ok
+
+      col when col in @order_columns ->
+        :ok
+
+      other ->
+        raise ArgumentError, "invalid order_by: #{inspect(other)}"
+    end)
+  end
+
+  defp validate_order_by!(other) do
+    raise ArgumentError, "invalid order_by: #{inspect(other)}"
+  end
+
+  defp validate_limit!(nil), do: :ok
+
+  defp validate_limit!(limit) when is_integer(limit) and limit > 0, do: :ok
+
+  defp validate_limit!(limit), do: raise(ArgumentError, "invalid limit: #{inspect(limit)}")
+
+  defp validate_offset!(nil), do: :ok
+
+  defp validate_offset!(offset) when is_integer(offset) and offset >= 0, do: :ok
+
+  defp validate_offset!(offset), do: raise(ArgumentError, "invalid offset: #{inspect(offset)}")
+
   @spec list_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
   def list_issues(conn, opts \\ []) do
     {where, params} = build_where(opts)
-    sql = "SELECT * FROM issues#{where} ORDER BY created_at ASC"
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
-    unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
-    rows = collect_rows(conn, stmt)
-    Exqlite.Sqlite3.release(conn, stmt)
-    {:ok, Enum.map(rows, fn {cols, row} -> row_to_issue(cols, row) |> enrich_issue(conn) end)}
+    {order_sql, order_params} = build_order(opts, default_order())
+    {limit_sql, limit_params} = build_limit_offset(opts)
+    sql = "SELECT * FROM issues#{where}#{order_sql}#{limit_sql}"
+    run_query(conn, sql, params ++ order_params ++ limit_params, &enrich_issue(&1, conn))
   end
 
   @spec list_issues_raw(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
   def list_issues_raw(conn, opts \\ []) do
     {where, params} = build_where(opts)
-    sql = "SELECT * FROM issues#{where} ORDER BY created_at ASC"
+    {order_sql, order_params} = build_order(opts, default_order())
+    {limit_sql, limit_params} = build_limit_offset(opts)
+    sql = "SELECT * FROM issues#{where}#{order_sql}#{limit_sql}"
+    run_query(conn, sql, params ++ order_params ++ limit_params, & &1)
+  end
+
+  @spec count_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, non_neg_integer()}
+  def count_issues(conn, opts \\ []) do
+    {where, params} = build_where(opts)
+    sql = "SELECT COUNT(*) FROM issues#{where}"
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
-    rows = collect_rows(conn, stmt)
+
+    count =
+      case Exqlite.Sqlite3.step(conn, stmt) do
+        {:row, [val]} -> val
+        :done -> 0
+      end
+
     Exqlite.Sqlite3.release(conn, stmt)
-    {:ok, Enum.map(rows, fn {cols, row} -> row_to_issue(cols, row) end)}
+    {:ok, count}
+  end
+
+  @spec count_roots(Exqlite.Sqlite3.db(), keyword()) :: {:ok, non_neg_integer()}
+  def count_roots(conn, opts \\ []) do
+    {where, params} = build_where(opts)
+
+    sql = """
+    WITH scope AS (SELECT id, parent FROM issues#{where})
+    SELECT COUNT(*) FROM scope
+    WHERE scope.parent IS NULL
+       OR NOT EXISTS (SELECT 1 FROM scope AS parent_check WHERE parent_check.id = scope.parent)
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
+
+    count =
+      case Exqlite.Sqlite3.step(conn, stmt) do
+        {:row, [val]} -> val
+        :done -> 0
+      end
+
+    Exqlite.Sqlite3.release(conn, stmt)
+    {:ok, count}
+  end
+
+  @doc """
+  Returns a page of in-scope root issues plus their complete subtrees.
+
+  Returns `{:ok, %{roots: [id], issues: [enriched], total_roots: n}}`.
+
+  Roots are in-scope issues whose parent is NULL or whose parent is outside scope.
+  Descendants are gathered via recursive CTE over the parent edge — a subtree stays
+  whole even if a descendant falls outside the scope filter.
+
+  Opts (in addition to scope filters in build_where):
+    - :limit, :offset — applied to ROOTS
+    - :order_by — ordering of ROOTS (default: priority DESC NULLs last, created_at DESC)
+  """
+  @spec list_tree_page(Exqlite.Sqlite3.db(), keyword()) ::
+          {:ok, %{roots: [non_neg_integer()], issues: [map()], total_roots: non_neg_integer()}}
+  def list_tree_page(conn, opts \\ []) do
+    {:ok, total_roots} = count_roots(conn, opts)
+    root_rows = fetch_root_page(conn, opts)
+
+    case root_rows do
+      [] ->
+        {:ok, %{roots: [], issues: [], total_roots: total_roots}}
+
+      _ ->
+        root_ids = Enum.map(root_rows, &Map.get(&1, :raw_id))
+        descendant_ids = gather_descendants(conn, root_ids)
+        all_raw_ids = root_ids ++ descendant_ids
+        issues = fetch_and_enrich_by_ids(conn, all_raw_ids)
+        root_enriched_ids = root_ids |> Enum.map(&parse_numeric_id/1)
+        {:ok, %{roots: root_enriched_ids, issues: issues, total_roots: total_roots}}
+    end
   end
 
   # --- Labels ---
@@ -332,6 +449,171 @@ defmodule Bee.Store do
     result = collect_scalars(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
     result
+  end
+
+  # --- Query builders ---
+
+  defp default_order, do: [created_at: :asc]
+
+  defp root_default_order, do: [priority: :desc, created_at: :desc]
+
+  defp build_order(opts, default) do
+    case Keyword.get(opts, :order_by) do
+      nil ->
+        build_order_clause(default)
+
+      order_by when is_list(order_by) ->
+        validated =
+          Enum.map(order_by, fn
+            {col, dir} when col in @order_columns and dir in @order_directions ->
+              {col, dir}
+
+            col when col in @order_columns ->
+              {col, :asc}
+
+            other ->
+              raise ArgumentError, "invalid order_by: #{inspect(other)}"
+          end)
+
+        build_order_clause(validated)
+
+      other ->
+        raise ArgumentError, "invalid order_by: #{inspect(other)}"
+    end
+  end
+
+  defp build_order_clause([]), do: {"", []}
+
+  defp build_order_clause(order_spec) do
+    parts =
+      Enum.map(order_spec, fn {col, dir} ->
+        col_str = Atom.to_string(col)
+        dir_str = String.upcase(Atom.to_string(dir))
+
+        case col do
+          :priority ->
+            "priority IS NULL, #{col_str} #{dir_str}"
+
+          _ ->
+            "#{col_str} #{dir_str}"
+        end
+      end)
+
+    {" ORDER BY " <> Enum.join(parts, ", "), []}
+  end
+
+  defp build_limit_offset(opts) do
+    limit = Keyword.get(opts, :limit)
+    offset = Keyword.get(opts, :offset)
+
+    case {limit, offset} do
+      {nil, nil} ->
+        {"", []}
+
+      {nil, offset} when is_integer(offset) and offset >= 0 ->
+        {" LIMIT -1 OFFSET ?", [offset]}
+
+      {limit, nil} when is_integer(limit) and limit > 0 ->
+        {" LIMIT ?", [limit]}
+
+      {limit, offset} when is_integer(limit) and limit > 0 and is_integer(offset) and offset >= 0 ->
+        {" LIMIT ? OFFSET ?", [limit, offset]}
+
+      {limit, _} when not is_nil(limit) ->
+        raise ArgumentError, "invalid limit: #{inspect(limit)}"
+
+      {_, offset} when not is_nil(offset) ->
+        raise ArgumentError, "invalid offset: #{inspect(offset)}"
+    end
+  end
+
+  defp run_query(conn, sql, params, enrich_fn) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
+    rows = collect_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+    {:ok, Enum.map(rows, fn {cols, row} -> row_to_issue(cols, row) |> enrich_fn.() end)}
+  end
+
+  # --- Tree page internals ---
+
+  defp fetch_root_page(conn, opts) do
+    {where, params} = build_where(opts)
+    {order_sql, order_params} = build_order(opts, root_default_order())
+    {limit_sql, limit_params} = build_limit_offset(opts)
+
+    sql = """
+    WITH scope AS (SELECT * FROM issues#{where})
+    SELECT scope.* FROM scope
+    WHERE scope.parent IS NULL
+       OR NOT EXISTS (SELECT 1 FROM scope AS p WHERE p.id = scope.parent)
+    #{order_sql}#{limit_sql}
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+
+    all_params = params ++ order_params ++ limit_params
+    unless all_params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, all_params)
+
+    rows = collect_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    Enum.map(rows, fn {cols, row} ->
+      map = Enum.zip(cols, row) |> Map.new()
+      %{raw_id: map["id"], title: map["title"]}
+    end)
+  end
+
+  defp gather_descendants(conn, root_ids) do
+    placeholders = root_ids |> Enum.map(fn _ -> "?" end) |> Enum.join(", ")
+
+    sql = """
+    WITH RECURSIVE subtree(id) AS (
+      SELECT id FROM issues WHERE parent IN (#{placeholders})
+      UNION ALL
+      SELECT i.id FROM issues i
+      INNER JOIN subtree s ON i.parent = s.id
+    )
+    SELECT DISTINCT id FROM subtree
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    :ok = Exqlite.Sqlite3.bind(stmt, root_ids)
+    ids = collect_scalars(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+    ids
+  end
+
+  defp fetch_and_enrich_by_ids(conn, raw_ids) do
+    case raw_ids do
+      [] ->
+        []
+
+      _ ->
+        placeholders = raw_ids |> Enum.map(fn _ -> "?" end) |> Enum.join(", ")
+        sql = "SELECT * FROM issues WHERE id IN (#{placeholders})"
+
+        {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+        :ok = Exqlite.Sqlite3.bind(stmt, raw_ids)
+        rows = collect_rows(conn, stmt)
+        Exqlite.Sqlite3.release(conn, stmt)
+
+        rows
+        |> Enum.map(fn {cols, row} -> row_to_issue(cols, row) |> enrich_issue(conn) end)
+        |> sort_by_root_order(conn, raw_ids)
+    end
+  end
+
+  defp sort_by_root_order(issues, _conn, raw_ids) do
+    # Build position map keyed by numeric id (roots first, then descendants in CTE order)
+    order_map =
+      raw_ids
+      |> Enum.with_index()
+      |> Map.new(fn {raw_id, idx} -> {parse_numeric_id(raw_id), idx} end)
+
+    Enum.sort_by(issues, fn issue ->
+      Map.get(order_map, issue.id, 999_999)
+    end)
   end
 
   # --- Helpers ---

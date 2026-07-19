@@ -77,6 +77,14 @@ defmodule Bee.Repo do
     {:reply, Bee.Store.list_issues(state.conn, opts), state}
   end
 
+  def handle_call({:count, opts}, _from, state) do
+    {:reply, Bee.Store.count_issues(state.conn, opts), state}
+  end
+
+  def handle_call({:tree_page, opts}, _from, state) do
+    {:reply, Bee.Store.list_tree_page(state.conn, opts), state}
+  end
+
   def handle_call({:ready, _opts}, _from, state) do
     ready_ids = Bee.Graph.ready_issues(state.dep_graph, state.conn)
 
