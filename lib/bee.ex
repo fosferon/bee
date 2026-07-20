@@ -7,7 +7,20 @@ defmodule Bee do
 
   def get(id, server \\ @default_server), do: GenServer.call(server, {:get, id})
   def ready(opts \\ [], server \\ @default_server), do: GenServer.call(server, {:ready, opts})
-  def list(opts \\ [], server \\ @default_server), do: GenServer.call(server, {:list, opts})
+  def list(opts \\ [], server \\ @default_server) do
+    Bee.Store.validate_opts!(opts)
+    GenServer.call(server, {:list, opts})
+  end
+
+  def count(opts \\ [], server \\ @default_server) do
+    Bee.Store.validate_opts!(opts)
+    GenServer.call(server, {:count, opts})
+  end
+
+  def tree_page(opts \\ [], server \\ @default_server) do
+    Bee.Store.validate_opts!(opts)
+    GenServer.call(server, {:tree_page, opts})
+  end
   def create(title, opts \\ [], server \\ @default_server), do: GenServer.call(server, {:create, title, opts})
   def update(id, attrs, server \\ @default_server), do: GenServer.call(server, {:update, id, attrs})
   def comment(id, text, opts \\ [], server \\ @default_server), do: GenServer.call(server, {:comment, id, text, opts})
