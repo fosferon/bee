@@ -434,4 +434,45 @@ defmodule BeeTest do
       assert result.issues == []
     end
   end
+
+  # GC-3353 item 4: missing-issue writes must fail soft (return :not_found)
+  # rather than crash Bee.Repo via a `:done = step(...)` badmatch on the
+  # FOREIGN KEY violation. Regression for the 2026-07-23 bee.db wipe fallout.
+  describe "fail-soft writes against a missing issue (GC-3353)" do
+    test "comment on a missing issue returns :not_found and keeps Bee.Repo alive", %{server: s} do
+      pid = Process.whereis(s)
+
+      assert {:error, :not_found} = Bee.comment(999, "orphan", [], s)
+
+      # The GenServer did not crash/restart — same pid, still alive — and a
+      # subsequent valid create/get succeeds.
+      assert Process.whereis(s) == pid
+      assert Process.alive?(pid)
+
+      {:ok, issue} = Bee.create("After orphan comment", [], s)
+      {:ok, fetched} = Bee.get(issue.id, s)
+      assert fetched.title == "After orphan comment"
+
+      # A real comment on an existing issue still works.
+      assert :ok = Bee.comment(issue.id, "real note", [], s)
+    end
+
+    test "lock/claim on a missing issue returns :not_found and keeps Bee.Repo alive", %{
+      server: s
+    } do
+      pid = Process.whereis(s)
+
+      assert {:error, :not_found} = Bee.lock(999, [locked_by: "agent-x"], s)
+
+      assert Process.whereis(s) == pid
+      assert Process.alive?(pid)
+
+      {:ok, issue} = Bee.create("Lockable", [], s)
+      assert {:ok, _lock} = Bee.lock(issue.id, [locked_by: "agent-x"], s)
+    end
+
+    test "update/done on a missing issue returns :not_found", %{server: s} do
+      assert {:error, :not_found} = Bee.update(999, %{status: "closed"}, s)
+    end
+  end
 end

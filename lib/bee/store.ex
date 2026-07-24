@@ -386,7 +386,8 @@ defmodule Bee.Store do
 
   # --- Comments ---
 
-  @spec insert_comment(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) :: :ok
+  @spec insert_comment(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
   def insert_comment(conn, issue_id, body, opts \\ []) do
     now = now_iso()
     author = Keyword.get(opts, :author)
@@ -397,8 +398,6 @@ defmodule Bee.Store do
       author,
       now
     ])
-
-    :ok
   end
 
   @spec get_comments(Exqlite.Sqlite3.db(), String.t()) :: [map()]
@@ -644,12 +643,22 @@ defmodule Bee.Store do
 
   # --- Helpers ---
 
+  # Fail soft: a hard `:done = step(...)` match turned a SQLite constraint
+  # error (e.g. a FOREIGN KEY violation from a comment/lock/dependency
+  # referencing a missing issue) into a `{:badmatch}` that crashed the owning
+  # `Bee.Repo` GenServer and surfaced as HTTP 500 (GC-3353). We now surface the
+  # error to the caller and always release the statement.
+  @spec exec(Exqlite.Sqlite3.db(), String.t(), list()) :: :ok | {:error, term()}
   defp exec(conn, sql, params) do
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     :ok = Exqlite.Sqlite3.bind(stmt, params)
-    :done = Exqlite.Sqlite3.step(conn, stmt)
+    result = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
-    :ok
+
+    case result do
+      :done -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   def collect_rows(conn, stmt) do

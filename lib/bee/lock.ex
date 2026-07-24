@@ -4,7 +4,7 @@ defmodule Bee.Lock do
   @default_ttl_minutes 30
 
   @spec acquire(Exqlite.Sqlite3.db(), String.t(), keyword()) ::
-          {:ok, map()} | {:error, :already_locked}
+          {:ok, map()} | {:error, :already_locked} | {:error, term()}
   def acquire(conn, issue_id, opts \\ []) do
     force = Keyword.get(opts, :force, false)
     locked_by = Keyword.get(opts, :locked_by)
@@ -14,24 +14,28 @@ defmodule Bee.Lock do
     now_iso = DateTime.to_iso8601(now)
     expires_at = DateTime.add(now, ttl_minutes * 60) |> DateTime.to_iso8601()
 
-    if force do
-      run_sql(
-        conn,
-        "INSERT OR REPLACE INTO locks (issue_id, locked_by, locked_at, expires_at) VALUES (?, ?, ?, ?)",
-        [issue_id, locked_by, now_iso, expires_at]
-      )
+    lock = %{issue_id: issue_id, locked_by: locked_by, locked_at: now_iso, expires_at: expires_at}
 
-      {:ok, %{issue_id: issue_id, locked_by: locked_by, locked_at: now_iso, expires_at: expires_at}}
+    if force do
+      with :ok <-
+             run_sql(
+               conn,
+               "INSERT OR REPLACE INTO locks (issue_id, locked_by, locked_at, expires_at) VALUES (?, ?, ?, ?)",
+               [issue_id, locked_by, now_iso, expires_at]
+             ) do
+        {:ok, lock}
+      end
     else
       case get(conn, issue_id) do
         nil ->
-          run_sql(
-            conn,
-            "INSERT INTO locks (issue_id, locked_by, locked_at, expires_at) VALUES (?, ?, ?, ?)",
-            [issue_id, locked_by, now_iso, expires_at]
-          )
-
-          {:ok, %{issue_id: issue_id, locked_by: locked_by, locked_at: now_iso, expires_at: expires_at}}
+          with :ok <-
+                 run_sql(
+                   conn,
+                   "INSERT INTO locks (issue_id, locked_by, locked_at, expires_at) VALUES (?, ?, ?, ?)",
+                   [issue_id, locked_by, now_iso, expires_at]
+                 ) do
+            {:ok, lock}
+          end
 
         _existing ->
           {:error, :already_locked}
@@ -75,11 +79,19 @@ defmodule Bee.Lock do
     changes
   end
 
+  # Fail soft (GC-3353): surface constraint errors (e.g. a lock referencing a
+  # missing issue -> FOREIGN KEY violation) instead of a `{:badmatch}` that
+  # crashed the owning `Bee.Repo` GenServer. Always release the statement.
+  @spec run_sql(Exqlite.Sqlite3.db(), String.t(), list()) :: :ok | {:error, term()}
   defp run_sql(conn, sql, params) do
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     :ok = Exqlite.Sqlite3.bind(stmt, params)
-    :done = Exqlite.Sqlite3.step(conn, stmt)
+    result = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
-    :ok
+
+    case result do
+      :done -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 end

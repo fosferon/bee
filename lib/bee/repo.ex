@@ -114,9 +114,15 @@ defmodule Bee.Repo do
 
   def handle_call({:comment, id, text, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
-    Bee.Store.insert_comment(state.conn, full, text, opts)
-    maybe_export(state)
-    {:reply, :ok, state}
+
+    case Bee.Store.insert_comment(state.conn, full, text, opts) do
+      :ok ->
+        maybe_export(state)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
   end
 
   def handle_call({:block, id, blocker_id}, _from, state) do
@@ -152,8 +158,16 @@ defmodule Bee.Repo do
       Bee.World.add_agent(state.alloc_graph, locked_by)
     end
 
-    result = Bee.Lock.acquire(state.conn, full, opts)
-    if match?({:ok, _}, result), do: maybe_export(state)
+    result =
+      case Bee.Lock.acquire(state.conn, full, opts) do
+        {:ok, _} = ok ->
+          maybe_export(state)
+          ok
+
+        {:error, reason} ->
+          {:error, classify_write_error(reason)}
+      end
+
     {:reply, result, state}
   end
 
@@ -247,6 +261,17 @@ defmodule Bee.Repo do
   defp schedule_lock_sweep do
     Process.send_after(self(), :sweep_locks, @lock_sweep_interval_ms)
   end
+
+  # A SQLite FOREIGN KEY violation on a write that references an issue means the
+  # target issue no longer exists (GC-3353: comment/lock against a deleted
+  # issue). Translate that raw driver error into a structured `:not_found` so
+  # callers get a clean not-found instead of a crashed GenServer. Structured
+  # atoms (`:already_locked`, `:cycle`) and any other reason pass through.
+  defp classify_write_error(reason) when is_binary(reason) do
+    if reason =~ ~r/FOREIGN KEY/i, do: :not_found, else: reason
+  end
+
+  defp classify_write_error(reason), do: reason
 
   defp resolve_id(id, prefix) when is_integer(id), do: "#{prefix}-#{id}"
 
