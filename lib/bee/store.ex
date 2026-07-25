@@ -417,17 +417,23 @@ defmodule Bee.Store do
   # --- Comments ---
 
   @spec insert_comment(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
-          :ok | {:error, term()}
+          :ok | {:error, :not_found} | {:error, term()}
   def insert_comment(conn, issue_id, body, opts \\ []) do
-    now = now_iso()
-    author = Keyword.get(opts, :author)
+    case get_issue(conn, issue_id) do
+      {:ok, _issue} ->
+        now = now_iso()
+        author = Keyword.get(opts, :author)
 
-    exec(conn, "INSERT INTO comments (issue_id, body, author, created_at) VALUES (?, ?, ?, ?)", [
-      issue_id,
-      body,
-      author,
-      now
-    ])
+        exec(conn, "INSERT INTO comments (issue_id, body, author, created_at) VALUES (?, ?, ?, ?)", [
+          issue_id,
+          body,
+          author,
+          now
+        ])
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+    end
   end
 
   @spec get_comments(Exqlite.Sqlite3.db(), String.t()) :: [map()]

@@ -270,5 +270,10 @@ defmodule BeeParityHarnessTest do
       assert Bee.comment(g.id, "via module", [], s) ==
                GenServer.call(s, {:comment, g.id, "via message", []})
     end
+
+    test "comment on missing issue returns identical not_found via both surfaces", %{server: s} do
+      assert Bee.comment("GC-9999", "orphan test", [], s) ==
+               GenServer.call(s, {:comment, "GC-9999", "orphan test", []})
+    end
   end
 end
