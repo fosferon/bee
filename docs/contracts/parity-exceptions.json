@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "description": "Declared intentional differences between the Bee module API (Bee.* facade) and the GenServer message protocol ({verb, args}). The parity harness (test/parity_harness_test.exs) reads this list and allows these differences. Any difference NOT listed here is a parity bug.",
+  "exceptions": [
+    {
+      "name": "validation_error_surface",
+      "description": "Structural/type validation errors (invalid order_by, limit, offset, include) raise ArgumentError in the module API caller process but return {:error, reason} at the GenServer message boundary. This is by design (AD-25, Story 1.1) so a bad option arriving by message never raises inside handle_call and kills the single writer with every queued command behind it.",
+      "applies_to": ["get/3", "list/2", "count/2", "tree_page/2"],
+      "module_api": "raises ArgumentError",
+      "message_protocol": "returns {:error, reason}"
+    }
+  ]
+}
