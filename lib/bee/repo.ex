@@ -75,15 +75,24 @@ defmodule Bee.Repo do
   end
 
   def handle_call({:list, opts}, _from, state) do
-    {:reply, Bee.Store.list_issues(state.conn, opts), state}
+    case Bee.Store.validate_opts(opts) do
+      :ok -> {:reply, Bee.Store.list_issues(state.conn, opts), state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:count, opts}, _from, state) do
-    {:reply, Bee.Store.count_issues(state.conn, opts), state}
+    case Bee.Store.validate_opts(opts) do
+      :ok -> {:reply, Bee.Store.count_issues(state.conn, opts), state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:tree_page, opts}, _from, state) do
-    {:reply, Bee.Store.list_tree_page(state.conn, opts), state}
+    case Bee.Store.validate_opts(opts) do
+      :ok -> {:reply, Bee.Store.list_tree_page(state.conn, opts), state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:ready, _opts}, _from, state) do

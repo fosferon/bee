@@ -292,6 +292,7 @@ defmodule BeeTest do
 
     test "order_by rejects non-whitelisted column", %{server: s} do
       {:ok, _} = Bee.create("Issue", [], s)
+
       assert_raise ArgumentError, ~r/invalid order_by/, fn ->
         Bee.list([order_by: [evil_column: :asc]], s)
       end
@@ -299,6 +300,7 @@ defmodule BeeTest do
 
     test "order_by rejects bad direction", %{server: s} do
       {:ok, _} = Bee.create("Issue", [], s)
+
       assert_raise ArgumentError, ~r/invalid order_by/, fn ->
         Bee.list([order_by: [priority: :sideways]], s)
       end
@@ -349,10 +351,11 @@ defmodule BeeTest do
 
       # Must include root + descendants = all 4 issues
       all_ids = result.issues |> Enum.map(& &1.id) |> MapSet.new()
+
       assert MapSet.subset?(
-        MapSet.new([root1.id, root2.id, child1.id, grandchild1.id]),
-        all_ids
-      )
+               MapSet.new([root1.id, root2.id, child1.id, grandchild1.id]),
+               all_ids
+             )
     end
 
     test "roots-only pagination returns complete subtrees", %{server: s} do
@@ -371,9 +374,10 @@ defmodule BeeTest do
       assert length(page1.issues) == 2
       root_id = hd(page1.roots)
       child_id = Enum.find(page1.issues, fn i -> i.id != root_id end).id
+
       assert Enum.any?(page1.issues, fn i ->
-        i.id == child_id and i.parent == root_id
-      end)
+               i.id == child_id and i.parent == root_id
+             end)
     end
 
     test "cross-scope parent makes child a root", %{server: s} do
@@ -473,6 +477,48 @@ defmodule BeeTest do
 
     test "update/done on a missing issue returns :not_found", %{server: s} do
       assert {:error, :not_found} = Bee.update(999, %{status: "closed"}, s)
+    end
+  end
+
+  # Story 1.1 — shared validator: module API raises, server boundary returns.
+  # The live bug this closes: a bad order_by arriving by message raised inside
+  # handle_call and killed the writer with every queued command behind it.
+  describe "opts validation (Story 1.1)" do
+    test "module API raises on invalid order_by", %{server: s} do
+      assert_raise ArgumentError, fn -> Bee.list([order_by: :bogus], s) end
+    end
+
+    test "module API raises on invalid limit and offset", %{server: s} do
+      assert_raise ArgumentError, fn -> Bee.list([limit: 0], s) end
+      assert_raise ArgumentError, fn -> Bee.list([offset: -1], s) end
+    end
+
+    test "message path returns a tagged error and does NOT kill the writer", %{server: s} do
+      pid = Process.whereis(s)
+
+      assert {:error, {:invalid_order_by, :bogus}} =
+               GenServer.call(s, {:list, [order_by: :bogus]})
+
+      # the writer must still be the same living process, serving the queue
+      assert Process.whereis(s) == pid
+      assert Process.alive?(pid)
+
+      {:ok, _} = Bee.create("survives", [], s)
+      assert {:ok, all} = GenServer.call(s, {:list, []})
+      assert length(all) == 1
+    end
+
+    test "message path errors are from the closed vocabulary", %{server: s} do
+      assert {:error, {:invalid_limit, 0}} = GenServer.call(s, {:list, [limit: 0]})
+      assert {:error, {:invalid_offset, -1}} = GenServer.call(s, {:count, [offset: -1]})
+      assert {:error, {:invalid_order_by, _}} = GenServer.call(s, {:tree_page, [order_by: 123]})
+    end
+
+    test "valid opts pass both the module and message paths", %{server: s} do
+      {:ok, _} = Bee.create("a", [], s)
+      assert {:ok, _} = Bee.list([order_by: [priority: :desc], limit: 10], s)
+      assert {:ok, _} = GenServer.call(s, {:list, [order_by: [:created_at]]})
+      assert Bee.Store.validate_opts(limit: 5, offset: 0) == :ok
     end
   end
 end

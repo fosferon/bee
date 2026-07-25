@@ -8,7 +8,14 @@ defmodule Bee.Agents do
     run_sql(
       conn,
       "INSERT OR IGNORE INTO projects (id, name, path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, Map.get(attrs, :name, id), Map.get(attrs, :path), Map.get(attrs, :status, "active"), now, now]
+      [
+        id,
+        Map.get(attrs, :name, id),
+        Map.get(attrs, :path),
+        Map.get(attrs, :status, "active"),
+        now,
+        now
+      ]
     )
 
     get_project(conn, id)
@@ -47,7 +54,14 @@ defmodule Bee.Agents do
     run_sql(
       conn,
       "INSERT OR IGNORE INTO agents (id, name, type, status, capabilities, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, Map.get(attrs, :name, id), Map.get(attrs, :type, "worker"), Map.get(attrs, :status, "idle"), caps, now]
+      [
+        id,
+        Map.get(attrs, :name, id),
+        Map.get(attrs, :type, "worker"),
+        Map.get(attrs, :status, "idle"),
+        caps,
+        now
+      ]
     )
 
     get_agent(conn, id)

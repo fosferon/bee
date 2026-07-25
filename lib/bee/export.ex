@@ -21,13 +21,24 @@ defmodule Bee.Export do
           "updated_at" => issue.updated_at
         }
 
-        entry = if issue.description, do: Map.put(entry, "description", issue.description), else: entry
+        entry =
+          if issue.description, do: Map.put(entry, "description", issue.description), else: entry
+
         entry = if issue.closed_at, do: Map.put(entry, "closed_at", issue.closed_at), else: entry
-        entry = if issue.close_reason, do: Map.put(entry, "close_reason", issue.close_reason), else: entry
+
+        entry =
+          if issue.close_reason,
+            do: Map.put(entry, "close_reason", issue.close_reason),
+            else: entry
+
         labels = Bee.Store.get_labels(conn, raw_id)
         entry = if labels != [], do: Map.put(entry, "labels", labels), else: entry
-        entry = if issue.assigned_to, do: Map.put(entry, "assigned_to", issue.assigned_to), else: entry
-        entry = if issue.project_id, do: Map.put(entry, "project_id", issue.project_id), else: entry
+
+        entry =
+          if issue.assigned_to, do: Map.put(entry, "assigned_to", issue.assigned_to), else: entry
+
+        entry =
+          if issue.project_id, do: Map.put(entry, "project_id", issue.project_id), else: entry
 
         blocked_by_ids = Bee.Store.get_blocked_by(conn, raw_id)
 
@@ -35,7 +46,12 @@ defmodule Bee.Export do
           if blocked_by_ids != [] do
             deps =
               Enum.map(blocked_by_ids, fn dep_id ->
-                %{"issue_id" => raw_id, "depends_on_id" => dep_id, "type" => "blocks", "created_at" => "0001-01-01T00:00:00Z"}
+                %{
+                  "issue_id" => raw_id,
+                  "depends_on_id" => dep_id,
+                  "type" => "blocks",
+                  "created_at" => "0001-01-01T00:00:00Z"
+                }
               end)
 
             Map.put(entry, "dependencies", deps)
@@ -110,7 +126,9 @@ defmodule Bee.Export do
           end
 
           Enum.each(Map.get(data, "comments", []), fn c ->
-            Bee.Store.insert_comment(conn, id, Map.get(c, "text", ""), author: Map.get(c, "author"))
+            Bee.Store.insert_comment(conn, id, Map.get(c, "text", ""),
+              author: Map.get(c, "author")
+            )
           end)
 
           Enum.each(Map.get(data, "dependencies", []), fn dep ->

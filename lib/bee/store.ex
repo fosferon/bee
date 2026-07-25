@@ -229,48 +229,61 @@ defmodule Bee.Store do
   end
 
   @doc """
-  Validates pagination opts (:order_by, :limit, :offset).
-  Raises ArgumentError on invalid input. Called from the public API before
-  dispatching to GenServer so errors surface in the caller's process.
+  Validates pagination opts (:order_by, :limit, :offset) and returns a result.
+
+  Returns `:ok` or `{:error, reason}` where `reason` is drawn from the closed
+  vocabulary `{:invalid_order_by | :invalid_limit | :invalid_offset, value}`.
+  Pure — it never raises. This is the shared validator (Story 1.1 / AD-25): the
+  module API raises on the error via `validate_opts!/1`; the server boundary
+  (`Bee.Repo`) returns it, so a bad option arriving by message can never raise
+  inside `handle_call` and take the single writer down.
+  """
+  @spec validate_opts(keyword()) :: :ok | {:error, term()}
+  def validate_opts(opts) do
+    with :ok <- validate_order_by(Keyword.get(opts, :order_by)),
+         :ok <- validate_limit(Keyword.get(opts, :limit)),
+         :ok <- validate_offset(Keyword.get(opts, :offset)) do
+      :ok
+    end
+  end
+
+  @doc """
+  Raising wrapper over `validate_opts/1` for the in-process module API.
+
+  Errors surface in the caller's own process as `ArgumentError`, preserving
+  module-API ergonomics. The server boundary uses `validate_opts/1` instead.
   """
   @spec validate_opts!(keyword()) :: :ok
   def validate_opts!(opts) do
-    validate_order_by!(Keyword.get(opts, :order_by))
-    validate_limit!(Keyword.get(opts, :limit))
-    validate_offset!(Keyword.get(opts, :offset))
-    :ok
+    case validate_opts(opts) do
+      :ok -> :ok
+      {:error, reason} -> raise ArgumentError, describe_opts_error(reason)
+    end
   end
 
-  defp validate_order_by!(nil), do: :ok
+  defp validate_order_by(nil), do: :ok
 
-  defp validate_order_by!(order_by) when is_list(order_by) do
-    Enum.each(order_by, fn
-      {col, dir} when col in @order_columns and dir in @order_directions ->
-        :ok
-
-      col when col in @order_columns ->
-        :ok
-
-      other ->
-        raise ArgumentError, "invalid order_by: #{inspect(other)}"
+  defp validate_order_by(order_by) when is_list(order_by) do
+    Enum.reduce_while(order_by, :ok, fn
+      {col, dir}, _ when col in @order_columns and dir in @order_directions -> {:cont, :ok}
+      col, _ when col in @order_columns -> {:cont, :ok}
+      other, _ -> {:halt, {:error, {:invalid_order_by, other}}}
     end)
   end
 
-  defp validate_order_by!(other) do
-    raise ArgumentError, "invalid order_by: #{inspect(other)}"
-  end
+  defp validate_order_by(other), do: {:error, {:invalid_order_by, other}}
 
-  defp validate_limit!(nil), do: :ok
+  defp validate_limit(nil), do: :ok
+  defp validate_limit(limit) when is_integer(limit) and limit > 0, do: :ok
+  defp validate_limit(limit), do: {:error, {:invalid_limit, limit}}
 
-  defp validate_limit!(limit) when is_integer(limit) and limit > 0, do: :ok
+  defp validate_offset(nil), do: :ok
+  defp validate_offset(offset) when is_integer(offset) and offset >= 0, do: :ok
+  defp validate_offset(offset), do: {:error, {:invalid_offset, offset}}
 
-  defp validate_limit!(limit), do: raise(ArgumentError, "invalid limit: #{inspect(limit)}")
-
-  defp validate_offset!(nil), do: :ok
-
-  defp validate_offset!(offset) when is_integer(offset) and offset >= 0, do: :ok
-
-  defp validate_offset!(offset), do: raise(ArgumentError, "invalid offset: #{inspect(offset)}")
+  defp describe_opts_error({:invalid_order_by, v}), do: "invalid order_by: #{inspect(v)}"
+  defp describe_opts_error({:invalid_limit, v}), do: "invalid limit: #{inspect(v)}"
+  defp describe_opts_error({:invalid_offset, v}), do: "invalid offset: #{inspect(v)}"
 
   @spec list_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
   def list_issues(conn, opts \\ []) do
@@ -541,7 +554,8 @@ defmodule Bee.Store do
       {limit, nil} when is_integer(limit) and limit > 0 ->
         {" LIMIT ?", [limit]}
 
-      {limit, offset} when is_integer(limit) and limit > 0 and is_integer(offset) and offset >= 0 ->
+      {limit, offset}
+      when is_integer(limit) and limit > 0 and is_integer(offset) and offset >= 0 ->
         {" LIMIT ? OFFSET ?", [limit, offset]}
 
       {limit, _} when not is_nil(limit) ->
