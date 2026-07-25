@@ -5,7 +5,19 @@ defmodule Bee do
 
   @default_server Bee.Repo
 
-  def get(id, server \\ @default_server), do: GenServer.call(server, {:get, id})
+  def get(id), do: GenServer.call(@default_server, {:get, id})
+
+  def get(id, opts) when is_list(opts), do: get(id, opts, @default_server)
+  def get(id, server), do: GenServer.call(server, {:get, id})
+
+  def get(id, opts, server) when is_list(opts) do
+    Bee.Store.validate_opts!(opts)
+    GenServer.call(server, {:get, id, opts})
+  end
+
+  def get_comments(id, server \\ @default_server),
+    do: GenServer.call(server, {:get_comments, id})
+
   def ready(opts \\ [], server \\ @default_server), do: GenServer.call(server, {:ready, opts})
 
   def list(opts \\ [], server \\ @default_server) do

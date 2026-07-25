@@ -521,4 +521,95 @@ defmodule BeeTest do
       assert Bee.Store.validate_opts(limit: 5, offset: 0) == :ok
     end
   end
+
+  describe "comment relations (Story 1.4)" do
+    test "dedicated comment reads return ordered issue comments", %{server: s} do
+      {:ok, issue} = Bee.create("With comments", [], s)
+      :ok = Bee.comment(issue.id, "First", [], s)
+      :ok = Bee.comment(issue.id, "Second", [], s)
+
+      assert {:ok, module_comments} = Bee.get_comments(issue.id, s)
+      assert Enum.map(module_comments, & &1.body) == ["First", "Second"]
+
+      assert {:ok, message_comments} = GenServer.call(s, {:get_comments, issue.id})
+      assert message_comments == module_comments
+    end
+
+    test "module and message get return requested comments", %{server: s} do
+      {:ok, issue} = Bee.create("With comments", [], s)
+      :ok = Bee.comment(issue.id, "First", [author: "one"], s)
+      :ok = Bee.comment(issue.id, "Second", [author: "two"], s)
+
+      assert {:ok, module_issue} = Bee.get(issue.id, [include: [:comments]], s)
+
+      assert Enum.map(module_issue.comments, & &1.body) == ["First", "Second"]
+      assert Enum.map(module_issue.comments, & &1.author) == ["one", "two"]
+
+      assert {:ok, message_issue} =
+               GenServer.call(s, {:get, issue.id, [include: [:comments]]})
+
+      assert message_issue.comments == module_issue.comments
+    end
+
+    test "omitted comments use the not_loaded relation sentinel", %{server: s} do
+      {:ok, issue} = Bee.create("With comments", [], s)
+      :ok = Bee.comment(issue.id, "Hidden", [], s)
+
+      assert {:ok, module_issue} = Bee.get(issue.id, s)
+      assert module_issue.comments == :not_loaded
+
+      assert {:ok, message_issue} = GenServer.call(s, {:get, issue.id})
+      assert message_issue.comments == :not_loaded
+    end
+
+    test "list groups requested comments and preserves empty relations", %{server: s} do
+      {:ok, first} = Bee.create("First", [], s)
+      {:ok, second} = Bee.create("Second", [], s)
+      {:ok, third} = Bee.create("Third", [], s)
+
+      :ok = Bee.comment(first.id, "First one", [], s)
+      :ok = Bee.comment(first.id, "First two", [], s)
+      :ok = Bee.comment(second.id, "Second one", [], s)
+
+      assert {:ok, unloaded_issues} = Bee.list([], s)
+      assert Enum.all?(unloaded_issues, &(&1.comments == :not_loaded))
+
+      assert {:ok, issues} = Bee.list([include: [:comments]], s)
+      issues_by_id = Map.new(issues, &{&1.id, &1})
+
+      assert Enum.map(issues_by_id[first.id].comments, & &1.body) == ["First one", "First two"]
+      assert Enum.map(issues_by_id[second.id].comments, & &1.body) == ["Second one"]
+      assert issues_by_id[third.id].comments == []
+    end
+
+    test "tree_page propagates requested comments", %{server: s} do
+      {:ok, root} = Bee.create("Root", [], s)
+      {:ok, child} = Bee.create("Child", [parent: root.id], s)
+      :ok = Bee.comment(root.id, "Root comment", [], s)
+      :ok = Bee.comment(child.id, "Child comment", [], s)
+
+      assert {:ok, %{issues: issues}} = Bee.tree_page([include: [:comments]], s)
+      issues_by_id = Map.new(issues, &{&1.id, &1})
+
+      assert Enum.map(issues_by_id[root.id].comments, & &1.body) == ["Root comment"]
+      assert Enum.map(issues_by_id[child.id].comments, & &1.body) == ["Child comment"]
+
+      assert {:ok, %{issues: unloaded_issues}} = Bee.tree_page([], s)
+      assert Enum.all?(unloaded_issues, &(&1.comments == :not_loaded))
+    end
+
+    test "invalid include raises at the module API and returns at the message boundary", %{
+      server: s
+    } do
+      assert_raise ArgumentError, fn -> Bee.get(1, [include: [:labels]], s) end
+
+      pid = Process.whereis(s)
+
+      assert {:error, {:invalid_include, [:labels]}} =
+               GenServer.call(s, {:get, 1, [include: [:labels]]})
+
+      assert Process.whereis(s) == pid
+      assert Process.alive?(pid)
+    end
+  end
 end

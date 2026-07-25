@@ -142,8 +142,9 @@ defmodule Bee.Store do
     get_issue(conn, id)
   end
 
-  @spec get_issue(Exqlite.Sqlite3.db(), String.t()) :: {:ok, map()} | {:error, :not_found}
-  def get_issue(conn, id) do
+  @spec get_issue(Exqlite.Sqlite3.db(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found}
+  def get_issue(conn, id, opts \\ []) do
     sql = "SELECT * FROM issues WHERE id = ?"
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     :ok = Exqlite.Sqlite3.bind(stmt, [id])
@@ -152,7 +153,8 @@ defmodule Bee.Store do
       {:row, row} ->
         {:ok, cols} = Exqlite.Sqlite3.columns(conn, stmt)
         Exqlite.Sqlite3.release(conn, stmt)
-        issue = row_to_issue(cols, row) |> enrich_issue(conn)
+        issue = row_to_issue(cols, row)
+        issue = enrich_issues([issue], conn, opts) |> hd()
         {:ok, issue}
 
       :done ->
@@ -242,7 +244,8 @@ defmodule Bee.Store do
   def validate_opts(opts) do
     with :ok <- validate_order_by(Keyword.get(opts, :order_by)),
          :ok <- validate_limit(Keyword.get(opts, :limit)),
-         :ok <- validate_offset(Keyword.get(opts, :offset)) do
+         :ok <- validate_offset(Keyword.get(opts, :offset)),
+         :ok <- validate_include(Keyword.get(opts, :include)) do
       :ok
     end
   end
@@ -281,9 +284,20 @@ defmodule Bee.Store do
   defp validate_offset(offset) when is_integer(offset) and offset >= 0, do: :ok
   defp validate_offset(offset), do: {:error, {:invalid_offset, offset}}
 
+  defp validate_include(nil), do: :ok
+
+  defp validate_include(include) when is_list(include) do
+    if Enum.all?(include, &(&1 == :comments)),
+      do: :ok,
+      else: {:error, {:invalid_include, include}}
+  end
+
+  defp validate_include(include), do: {:error, {:invalid_include, include}}
+
   defp describe_opts_error({:invalid_order_by, v}), do: "invalid order_by: #{inspect(v)}"
   defp describe_opts_error({:invalid_limit, v}), do: "invalid limit: #{inspect(v)}"
   defp describe_opts_error({:invalid_offset, v}), do: "invalid offset: #{inspect(v)}"
+  defp describe_opts_error({:invalid_include, v}), do: "invalid include: #{inspect(v)}"
 
   @spec list_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
   def list_issues(conn, opts \\ []) do
@@ -291,7 +305,10 @@ defmodule Bee.Store do
     {order_sql, order_params} = build_order(opts, default_order())
     {limit_sql, limit_params} = build_limit_offset(opts)
     sql = "SELECT * FROM issues#{where}#{order_sql}#{limit_sql}"
-    run_query(conn, sql, params ++ order_params ++ limit_params, &enrich_issue(&1, conn))
+
+    with {:ok, issues} <- run_query(conn, sql, params ++ order_params ++ limit_params) do
+      {:ok, enrich_issues(issues, conn, opts)}
+    end
   end
 
   @spec list_issues_raw(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
@@ -300,7 +317,7 @@ defmodule Bee.Store do
     {order_sql, order_params} = build_order(opts, default_order())
     {limit_sql, limit_params} = build_limit_offset(opts)
     sql = "SELECT * FROM issues#{where}#{order_sql}#{limit_sql}"
-    run_query(conn, sql, params ++ order_params ++ limit_params, & &1)
+    run_query(conn, sql, params ++ order_params ++ limit_params)
   end
 
   @spec count_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, non_neg_integer()}
@@ -371,7 +388,7 @@ defmodule Bee.Store do
         root_ids = Enum.map(root_rows, &Map.get(&1, :raw_id))
         descendant_ids = gather_descendants(conn, root_ids)
         all_raw_ids = root_ids ++ descendant_ids
-        issues = fetch_and_enrich_by_ids(conn, all_raw_ids)
+        issues = fetch_and_enrich_by_ids(conn, all_raw_ids, opts)
         root_enriched_ids = root_ids |> Enum.map(&parse_numeric_id/1)
         {:ok, %{roots: root_enriched_ids, issues: issues, total_roots: total_roots}}
     end
@@ -415,27 +432,53 @@ defmodule Bee.Store do
 
   @spec get_comments(Exqlite.Sqlite3.db(), String.t()) :: [map()]
   def get_comments(conn, issue_id) do
-    {:ok, stmt} =
-      Exqlite.Sqlite3.prepare(
-        conn,
-        "SELECT id, issue_id, body, author, created_at FROM comments WHERE issue_id = ? ORDER BY created_at ASC"
-      )
+    conn
+    |> get_comments_for_issues([issue_id])
+    |> Map.fetch!(issue_id)
+  end
 
-    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
-    rows = collect_rows(conn, stmt)
-    Exqlite.Sqlite3.release(conn, stmt)
+  @spec get_comments_for_issues(Exqlite.Sqlite3.db(), [String.t()]) :: %{String.t() => [map()]}
+  def get_comments_for_issues(conn, issue_ids) do
+    issue_ids = Enum.uniq(issue_ids)
 
-    Enum.map(rows, fn {cols, row} ->
-      map = Enum.zip(cols, row) |> Map.new()
+    case issue_ids do
+      [] ->
+        %{}
 
-      %{
-        id: map["id"],
-        issue_id: map["issue_id"],
-        body: map["body"],
-        author: map["author"],
-        created_at: map["created_at"]
-      }
-    end)
+      _ ->
+        placeholders = issue_ids |> Enum.map(fn _ -> "?" end) |> Enum.join(", ")
+
+        sql = """
+        SELECT id, issue_id, body, author, created_at
+        FROM comments
+        WHERE issue_id IN (#{placeholders})
+        ORDER BY issue_id ASC, created_at ASC, id ASC
+        """
+
+        {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+        :ok = Exqlite.Sqlite3.bind(stmt, issue_ids)
+        rows = collect_rows(conn, stmt)
+        Exqlite.Sqlite3.release(conn, stmt)
+
+        rows
+        |> Enum.map(&comment_from_row/1)
+        |> Enum.reduce(Map.new(issue_ids, &{&1, []}), fn comment, comments_by_issue ->
+          Map.update!(comments_by_issue, comment.issue_id, &[comment | &1])
+        end)
+        |> Map.new(fn {issue_id, comments} -> {issue_id, Enum.reverse(comments)} end)
+    end
+  end
+
+  defp comment_from_row({cols, row}) do
+    map = Enum.zip(cols, row) |> Map.new()
+
+    %{
+      id: map["id"],
+      issue_id: map["issue_id"],
+      body: map["body"],
+      author: map["author"],
+      created_at: map["created_at"]
+    }
   end
 
   # --- Dependencies ---
@@ -566,12 +609,12 @@ defmodule Bee.Store do
     end
   end
 
-  defp run_query(conn, sql, params, enrich_fn) do
+  defp run_query(conn, sql, params) do
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
     rows = collect_rows(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
-    {:ok, Enum.map(rows, fn {cols, row} -> row_to_issue(cols, row) |> enrich_fn.() end)}
+    {:ok, Enum.map(rows, fn {cols, row} -> row_to_issue(cols, row) end)}
   end
 
   # --- Tree page internals ---
@@ -623,7 +666,7 @@ defmodule Bee.Store do
     ids
   end
 
-  defp fetch_and_enrich_by_ids(conn, raw_ids) do
+  defp fetch_and_enrich_by_ids(conn, raw_ids, opts) do
     case raw_ids do
       [] ->
         []
@@ -638,7 +681,8 @@ defmodule Bee.Store do
         Exqlite.Sqlite3.release(conn, stmt)
 
         rows
-        |> Enum.map(fn {cols, row} -> row_to_issue(cols, row) |> enrich_issue(conn) end)
+        |> Enum.map(fn {cols, row} -> row_to_issue(cols, row) end)
+        |> enrich_issues(conn, opts)
         |> sort_by_root_order(conn, raw_ids)
     end
   end
@@ -714,7 +758,21 @@ defmodule Bee.Store do
     }
   end
 
-  defp enrich_issue(issue, conn) do
+  defp enrich_issues(issues, conn, opts) do
+    comments_by_issue =
+      if :comments in Keyword.get(opts, :include, []) do
+        get_comments_for_issues(conn, Enum.map(issues, & &1.id))
+      else
+        %{}
+      end
+
+    Enum.map(issues, fn issue ->
+      comments = Map.get(comments_by_issue, issue.id, :not_loaded)
+      enrich_issue(issue, conn, comments)
+    end)
+  end
+
+  defp enrich_issue(issue, conn, comments) do
     labels = get_labels(conn, issue.id)
     blocked_by = get_blocked_by(conn, issue.id)
     blocks = get_blocks(conn, issue.id)
@@ -733,7 +791,8 @@ defmodule Bee.Store do
       blocks: blocks_numeric,
       parent: parent_numeric,
       locked: lock != nil,
-      lock: lock
+      lock: lock,
+      comments: comments
     })
   end
 

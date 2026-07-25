@@ -74,6 +74,22 @@ defmodule Bee.Repo do
     {:reply, Bee.Store.get_issue(state.conn, full), state}
   end
 
+  def handle_call({:get, id, opts}, _from, state) do
+    case Bee.Store.validate_opts(opts) do
+      :ok ->
+        full = resolve_id(id, state.prefix)
+        {:reply, Bee.Store.get_issue(state.conn, full, opts), state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:get_comments, id}, _from, state) do
+    full = resolve_id(id, state.prefix)
+    {:reply, {:ok, Bee.Store.get_comments(state.conn, full)}, state}
+  end
+
   def handle_call({:list, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok -> {:reply, Bee.Store.list_issues(state.conn, opts), state}

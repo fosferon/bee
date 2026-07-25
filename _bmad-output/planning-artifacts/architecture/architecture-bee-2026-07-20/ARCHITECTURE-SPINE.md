@@ -383,7 +383,7 @@ Closed sets. **Adding a member is a spine amendment.**
 | Sweeper (AD-22 child 4) | `lock.expired` |
 | `measure/3` | `measurement.recorded` |
 | `register_project/3`, `register_agent/3`, `join_project/3`, `import_jsonl/2` | none — AD-19 non-command writes |
-| `get/2`, `list/2`, `count/2`, `ready/2`, `tree_page/2`, `agent_load/2`, `who_blocks_whom/1`, `bottlenecks/1` | none — reads |
+| `get/1`, `get/2`, `get/3`, `get_comments/2`, `list/2`, `count/2`, `ready/2`, `tree_page/2`, `agent_load/2`, `who_blocks_whom/1`, `bottlenecks/1` | none — reads |
 
 Functions marked **planned** exist in this spine but not yet in the code: `close/2`, `cancel/2`, `measure/3`.
 

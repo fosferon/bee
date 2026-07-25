@@ -33,7 +33,9 @@ can never fail outside the protocol's declared validation boundary.
 
 | Request | Success reply | Current declared error reply |
 | --- | --- | --- |
-| `{:get, id}` | `{:ok, issue}` | `{:error, :not_found}` |
+| `{:get, id}` | `{:ok, issue}` with `comments: :not_loaded` | `{:error, :not_found}` |
+| `{:get, id, opts}` | `{:ok, issue}` with requested relations | `{:error, :not_found \| {:invalid_include, value}}` |
+| `{:get_comments, id}` | `{:ok, comments}` | none |
 | `{:ready, opts}` | `{:ok, issues}` | none |
 | `{:list, opts}` | `{:ok, issues}` | `{:error, reason}` for invalid boundary options |
 | `{:count, opts}` | `{:ok, count}` | `{:error, reason}` for invalid boundary options |
@@ -57,6 +59,17 @@ can never fail outside the protocol's declared validation boundary.
 Boundary validation follows AD-25: `Bee.*` raises `ArgumentError` in its caller for
 structural errors, while raw invalid messages return `{:error, reason}` from
 `Bee.Repo` and must not raise inside `handle_call/3`.
+
+## Comments relation
+
+`include: [:comments]` is supported by `{:get, id, opts}`, `{:list, opts}`, and
+`{:tree_page, opts}`. It loads comments in ascending `created_at, id` order.
+For a result set, Bee loads all requested issue comments in one parameterized batch
+query; requested issues without comments receive `comments: []`.
+
+Without that include, every returned issue has `comments: :not_loaded`. This is an
+additive relation field and does not make comments default-loaded.
+`{:get_comments, id}` remains available for a direct issue-comment read.
 
 ## Non-public handler messages
 
