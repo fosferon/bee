@@ -17,29 +17,35 @@ defmodule Bee.Repo do
 
     db_path |> Path.dirname() |> File.mkdir_p!()
 
-    {:ok, conn} = Exqlite.Sqlite3.open(db_path)
-    :ok = Bee.Store.init_schema(conn)
+    case Bee.Store.Migrate.run_at_boot(db_path) do
+      :ok ->
+        {:ok, conn} = Exqlite.Sqlite3.open(db_path)
+        :ok = Bee.Store.init_schema(conn)
 
-    dep_graph = Bee.Graph.new()
-    alloc_graph = Bee.World.new()
+        dep_graph = Bee.Graph.new()
+        alloc_graph = Bee.World.new()
 
-    # Auto-import JSONL on first boot (empty DB + file exists)
-    maybe_seed_from_jsonl(conn, jsonl_path, prefix)
+        # Auto-import JSONL on first boot (empty DB + file exists)
+        maybe_seed_from_jsonl(conn, jsonl_path, prefix)
 
-    Bee.Graph.rebuild(dep_graph, conn)
-    Bee.World.rebuild(alloc_graph, conn)
+        Bee.Graph.rebuild(dep_graph, conn)
+        Bee.World.rebuild(alloc_graph, conn)
 
-    schedule_lock_sweep()
+        schedule_lock_sweep()
 
-    {:ok,
-     %{
-       conn: conn,
-       dep_graph: dep_graph,
-       alloc_graph: alloc_graph,
-       prefix: prefix,
-       jsonl_path: jsonl_path,
-       export_mode: :on_write
-     }}
+        {:ok,
+         %{
+           conn: conn,
+           dep_graph: dep_graph,
+           alloc_graph: alloc_graph,
+           prefix: prefix,
+           jsonl_path: jsonl_path,
+           export_mode: :on_write
+         }}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   # --- GenServer calls ---
