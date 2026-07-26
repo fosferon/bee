@@ -1,5 +1,6 @@
 defmodule Bee.Store.Migrate do
   @moduledoc false
+  require Logger
 
   @type migration :: {pos_integer(), atom(), (Exqlite.Sqlite3.db() -> :ok | {:error, term()})}
 
@@ -91,6 +92,9 @@ defmodule Bee.Store.Migrate do
 
   @spec migration_000() :: migration()
   def migration_000, do: {1, :baseline_normalization, &normalize_baseline/1}
+
+  @spec migration_001() :: migration()
+  def migration_001, do: {2, :fts_rebuild_and_labels_merge, &rebuild_fts_and_merge_labels/1}
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
           {:ok, :fresh | :devman | :gc_daemon} | {:error, :unknown_baseline}
@@ -266,6 +270,91 @@ defmodule Bee.Store.Migrate do
          :ok <- verify_fts_row_count(conn),
          :ok <- verify_canonical_projects(conn) do
       :ok
+    end
+  end
+
+  defp rebuild_fts_and_merge_labels(conn) do
+    with :ok <- merge_ghost_labels(conn) do
+      rebuild_fts(conn)
+    end
+  end
+
+  defp merge_ghost_labels(conn) do
+    with {:ok, orphan_count} <-
+           scalar(
+             conn,
+             """
+             SELECT COUNT(*)
+             FROM labels
+             LEFT JOIN issues ON issues.id = labels.issue_id
+             WHERE issues.id IS NULL
+             """
+           ),
+         :ok <-
+           execute(
+             conn,
+             """
+             INSERT OR IGNORE INTO issue_labels (issue_id, label)
+             SELECT labels.issue_id, labels.label
+             FROM labels
+             INNER JOIN issues ON issues.id = labels.issue_id
+             """
+           ),
+         :ok <- execute(conn, "DROP TABLE labels") do
+      if orphan_count > 0 do
+        Logger.warning("Bee migration 001 skipped #{orphan_count} orphaned legacy labels")
+      end
+
+      :ok
+    else
+      _ -> {:error, :labels_merge_failed}
+    end
+  end
+
+  defp rebuild_fts(conn) do
+    statements = [
+      "DROP TRIGGER issues_fts_ai",
+      "DROP TRIGGER issues_fts_ad",
+      "DROP TRIGGER issues_fts_au",
+      "DROP TABLE issues_fts",
+      """
+      CREATE VIRTUAL TABLE issues_fts USING fts5(
+        issue_id UNINDEXED,
+        title,
+        description,
+        tokenize='porter unicode61'
+      )
+      """,
+      """
+      CREATE TRIGGER issues_fts_ai AFTER INSERT ON issues BEGIN
+        INSERT INTO issues_fts (issue_id, title, description)
+        VALUES (new.id, new.title, COALESCE(new.description, ''));
+      END
+      """,
+      """
+      CREATE TRIGGER issues_fts_ad AFTER DELETE ON issues BEGIN
+        DELETE FROM issues_fts WHERE issue_id = old.id;
+      END
+      """,
+      """
+      CREATE TRIGGER issues_fts_au AFTER UPDATE ON issues BEGIN
+        DELETE FROM issues_fts WHERE issue_id = old.id;
+        INSERT INTO issues_fts (issue_id, title, description)
+        VALUES (new.id, new.title, COALESCE(new.description, ''));
+      END
+      """,
+      "INSERT INTO issues_fts (issue_id, title, description) SELECT id, title, COALESCE(description, '') FROM issues"
+    ]
+
+    case Enum.reduce_while(statements, :ok, fn sql, :ok ->
+           case execute(conn, sql) do
+             :ok -> {:cont, :ok}
+             {:error, _reason} -> {:halt, :error}
+           end
+         end) do
+      :ok -> verify_fts_row_count(conn)
+      :error -> {:error, :fts_rebuild_failed}
+      {:error, _reason} -> {:error, :fts_rebuild_failed}
     end
   end
 

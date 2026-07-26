@@ -260,6 +260,48 @@ defmodule Bee.Store.MigrateTest do
     assert table_exists?(conn, "unexpected")
   end
 
+  test "merges valid ghost labels, accounts for orphans, and rebuilds FTS", %{conn: conn} do
+    assert :ok =
+             Migrate.run(conn,
+               migrations: [Migrate.migration_000()]
+             )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO issues (
+          id, title, status, issue_type, created_at, updated_at
+        ) VALUES ('GC-1', 'Running', 'open', 'task', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO issues (
+          id, title, status, issue_type, created_at, updated_at
+        ) VALUES ('GC-2', 'Two', 'open', 'task', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    :ok = Exqlite.Sqlite3.execute(conn, "INSERT INTO issue_labels VALUES ('GC-1', 'duplicate')")
+    :ok = Exqlite.Sqlite3.execute(conn, "INSERT INTO labels VALUES ('GC-1', 'duplicate')")
+    :ok = Exqlite.Sqlite3.execute(conn, "INSERT INTO labels VALUES ('GC-1', 'merged')")
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF")
+    :ok = Exqlite.Sqlite3.execute(conn, "INSERT INTO labels VALUES ('missing', 'orphan')")
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA foreign_keys=ON")
+
+    assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000(), Migrate.migration_001()])
+
+    assert {:ok, 2} = Migrate.user_version(conn)
+    refute table_exists?(conn, "labels")
+    assert ["duplicate", "merged"] == labels_for(conn, "GC-1")
+    assert 2 == scalar(conn, "SELECT COUNT(*) FROM issues_fts")
+    assert 1 == scalar(conn, "SELECT COUNT(*) FROM issues_fts WHERE issues_fts MATCH 'run'")
+  end
+
   defp table_exists?(conn, table_name) do
     {:ok, stmt} =
       Exqlite.Sqlite3.prepare(
@@ -458,5 +500,34 @@ defmodule Bee.Store.MigrateTest do
     result = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
     result == {:row, [1]}
+  end
+
+  defp labels_for(conn, issue_id) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT label FROM issue_labels WHERE issue_id = ? ORDER BY label"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
+
+    try do
+      Stream.repeatedly(fn -> Exqlite.Sqlite3.step(conn, stmt) end)
+      |> Enum.take_while(&match?({:row, _}, &1))
+      |> Enum.map(fn {:row, [label]} -> label end)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp scalar(conn, sql) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+
+    try do
+      {:row, [value]} = Exqlite.Sqlite3.step(conn, stmt)
+      value
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
   end
 end
