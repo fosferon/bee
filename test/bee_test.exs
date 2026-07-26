@@ -41,6 +41,24 @@ defmodule BeeTest do
     assert fetched.title == "Test issue"
   end
 
+  test "Repo boot runs the registered migration plan" do
+    dir = Path.join(System.tmp_dir!(), "bee_migration_boot_#{System.unique_integer([:positive])}")
+    db_path = Path.join(dir, "bee.db")
+    name = :"bee_migration_boot_#{System.unique_integer([:positive])}"
+    File.mkdir_p!(dir)
+
+    {:ok, pid} =
+      Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+    {:ok, conn} = Exqlite.Sqlite3.open(db_path)
+    assert {:ok, 2} = Bee.Store.Migrate.user_version(conn)
+    assert sqlite_table_exists?(conn, "issues_fts")
+    refute sqlite_table_exists?(conn, "labels")
+    Exqlite.Sqlite3.close(conn)
+    GenServer.stop(pid)
+    File.rm_rf!(dir)
+  end
+
   test "list and ready issues", %{server: s} do
     {:ok, _} = Bee.create("Issue 1", [], s)
     {:ok, _} = Bee.create("Issue 2", [], s)
@@ -610,6 +628,22 @@ defmodule BeeTest do
 
       assert Process.whereis(s) == pid
       assert Process.alive?(pid)
+    end
+  end
+
+  defp sqlite_table_exists?(conn, table_name) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [table_name])
+
+    try do
+      Exqlite.Sqlite3.step(conn, stmt) == {:row, [1]}
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
     end
   end
 end

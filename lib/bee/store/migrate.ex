@@ -88,7 +88,7 @@ defmodule Bee.Store.Migrate do
   )
 
   @spec migrations() :: [migration()]
-  def migrations, do: []
+  def migrations, do: [migration_000(), migration_001()]
 
   @spec migration_000() :: migration()
   def migration_000, do: {1, :baseline_normalization, &normalize_baseline/1}
