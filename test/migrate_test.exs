@@ -165,6 +165,8 @@ defmodule Bee.Store.MigrateTest do
     backup_path =
       Path.join(System.tmp_dir!(), "bee_backup_#{System.unique_integer([:positive])}.db")
 
+    File.rm(backup_path)
+
     assert :ok =
              Migrate.run_at_boot(database_path(conn), migrations: [], backup_path: backup_path)
 
@@ -194,6 +196,68 @@ defmodule Bee.Store.MigrateTest do
     assert "do not overwrite" = File.read!(backup_path)
 
     on_exit(fn -> File.rm(backup_path) end)
+  end
+
+  test "normalises a fresh database to the canonical baseline projects schema", %{conn: conn} do
+    assert {:ok, :fresh} = Migrate.detect_baseline(conn)
+    assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000()])
+
+    assert {:ok, 1} = Migrate.user_version(conn)
+    assert canonical_project_columns() == table_columns(conn, "projects")
+    assert table_exists?(conn, "issues_fts")
+    assert table_exists?(conn, "labels")
+    assert table_exists?(conn, "issue_project_backfill_log")
+  end
+
+  test "normalises the DevMan baseline to the canonical baseline projects schema", %{conn: conn} do
+    :ok = Bee.Store.init_schema(conn)
+
+    assert {:ok, :devman} = Migrate.detect_baseline(conn)
+    assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000()])
+
+    assert {:ok, 1} = Migrate.user_version(conn)
+    assert canonical_project_columns() == table_columns(conn, "projects")
+    assert table_exists?(conn, "issues_fts")
+    assert table_exists?(conn, "labels")
+    assert table_exists?(conn, "issue_project_backfill_log")
+  end
+
+  test "normalises the gc_daemon baseline and folds legacy project data into metadata", %{
+    conn: conn
+  } do
+    create_gc_daemon_baseline(conn)
+
+    assert {:ok, :gc_daemon} = Migrate.detect_baseline(conn)
+    assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000()])
+
+    assert {:ok, 1} = Migrate.user_version(conn)
+    assert canonical_project_columns() == table_columns(conn, "projects")
+
+    assert ["daemon", "elixir", "ops", "https://example.test/bee", "/srv/bee", "sync", nil] =
+             project_adopted_values(conn, "bee")
+
+    assert %{
+             "gc_daemon" => %{
+               "branch" => "main",
+               "ports_json" => %{"http" => 4242},
+               "domains_json" => ["bee.example.test"],
+               "metadata_json" => %{"owner" => "gc"}
+             }
+           } = project_metadata(conn, "bee")
+
+    refute index_exists?(conn, "idx_projects_legacy")
+    assert index_exists?(conn, "idx_projects_status")
+    assert index_exists?(conn, "idx_projects_domain")
+  end
+
+  test "refuses an unrecognised populated database without stamping a version", %{conn: conn} do
+    :ok = Exqlite.Sqlite3.execute(conn, "CREATE TABLE unexpected (id INTEGER)")
+
+    assert {:error, {:migration_failed, :baseline_normalization, :unknown_baseline}} =
+             Migrate.run(conn, migrations: [Migrate.migration_000()])
+
+    assert {:ok, 0} = Migrate.user_version(conn)
+    assert table_exists?(conn, "unexpected")
   end
 
   defp table_exists?(conn, table_name) do
@@ -229,5 +293,170 @@ defmodule Bee.Store.MigrateTest do
     after
       Exqlite.Sqlite3.release(conn, stmt)
     end
+  end
+
+  defp create_gc_daemon_baseline(conn) do
+    :ok = Bee.Store.init_schema(conn)
+
+    [
+      "ALTER TABLE projects ADD COLUMN canonical_path TEXT",
+      "ALTER TABLE projects ADD COLUMN description TEXT",
+      "ALTER TABLE projects ADD COLUMN stack TEXT",
+      "ALTER TABLE projects ADD COLUMN domain TEXT",
+      "ALTER TABLE projects ADD COLUMN repo_url TEXT",
+      "ALTER TABLE projects ADD COLUMN branch TEXT",
+      "ALTER TABLE projects ADD COLUMN binary_path TEXT",
+      "ALTER TABLE projects ADD COLUMN launchd_service TEXT",
+      "ALTER TABLE projects ADD COLUMN data_dir TEXT",
+      "ALTER TABLE projects ADD COLUMN notes TEXT",
+      "ALTER TABLE projects ADD COLUMN ports_json TEXT NOT NULL DEFAULT '{}'",
+      "ALTER TABLE projects ADD COLUMN domains_json TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE projects ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE projects ADD COLUMN commands_json TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE projects ADD COLUMN key_files_json TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE projects ADD COLUMN related_projects_json TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE projects ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+      "ALTER TABLE projects ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'",
+      "ALTER TABLE projects ADD COLUMN last_synced_at TEXT",
+      "CREATE INDEX idx_projects_status ON projects(status)",
+      "CREATE INDEX idx_projects_domain ON projects(domain)",
+      "CREATE INDEX idx_projects_legacy ON projects(branch)",
+      """
+      CREATE TABLE labels (
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        PRIMARY KEY (issue_id, label)
+      )
+      """,
+      """
+      CREATE TABLE issue_project_backfill_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        old_project_id TEXT,
+        new_project_id TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+      """,
+      """
+      CREATE VIRTUAL TABLE issues_fts USING fts5(
+        issue_id UNINDEXED,
+        title,
+        description,
+        tokenize='porter unicode61'
+      )
+      """,
+      """
+      CREATE TRIGGER issues_fts_ai AFTER INSERT ON issues BEGIN
+        INSERT INTO issues_fts (issue_id, title, description)
+        VALUES (new.id, new.title, COALESCE(new.description, ''));
+      END
+      """,
+      """
+      CREATE TRIGGER issues_fts_ad AFTER DELETE ON issues BEGIN
+        DELETE FROM issues_fts WHERE issue_id = old.id;
+      END
+      """,
+      """
+      CREATE TRIGGER issues_fts_au AFTER UPDATE ON issues BEGIN
+        DELETE FROM issues_fts WHERE issue_id = old.id;
+        INSERT INTO issues_fts (issue_id, title, description)
+        VALUES (new.id, new.title, COALESCE(new.description, ''));
+      END
+      """
+    ]
+    |> Enum.each(fn sql -> :ok = Exqlite.Sqlite3.execute(conn, sql) end)
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO projects (
+          id, name, path, status, created_at, updated_at, canonical_path, description,
+          stack, domain, repo_url, branch, binary_path, launchd_service, data_dir, notes,
+          ports_json, domains_json, tags_json, commands_json, key_files_json,
+          related_projects_json, metadata_json, source, last_synced_at
+        ) VALUES (
+          'bee', 'Bee', '/srv/bee', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+          '/srv/bee', 'daemon', 'elixir', 'ops', 'https://example.test/bee', 'main',
+          '/usr/local/bin/bee', 'com.example.bee', '/var/lib/bee', 'not json',
+          '{"http":4242}', '["bee.example.test"]', '["core"]', '["mix test"]',
+          '["mix.exs"]', '["gc"]', '{"owner":"gc"}', 'sync', NULL
+        )
+        """
+      )
+  end
+
+  defp canonical_project_columns do
+    [
+      {"id", "TEXT", 0, nil, 1},
+      {"name", "TEXT", 1, nil, 0},
+      {"path", "TEXT", 0, nil, 0},
+      {"status", "TEXT", 1, "'active'", 0},
+      {"created_at", "TEXT", 1, nil, 0},
+      {"updated_at", "TEXT", 1, nil, 0},
+      {"description", "TEXT", 0, nil, 0},
+      {"stack", "TEXT", 0, nil, 0},
+      {"domain", "TEXT", 0, nil, 0},
+      {"repo_url", "TEXT", 0, nil, 0},
+      {"canonical_path", "TEXT", 0, nil, 0},
+      {"source", "TEXT", 1, "'manual'", 0},
+      {"last_synced_at", "TEXT", 0, nil, 0},
+      {"metadata", "TEXT", 1, "'{}'", 0}
+    ]
+  end
+
+  defp table_columns(conn, table) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA table_info(#{table})")
+
+    try do
+      Stream.repeatedly(fn -> Exqlite.Sqlite3.step(conn, stmt) end)
+      |> Enum.take_while(&match?({:row, _}, &1))
+      |> Enum.map(fn {:row, [_cid, name, type, not_null, default, primary_key]} ->
+        {name, type, not_null, default, primary_key}
+      end)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp project_adopted_values(conn, id) do
+    scalar_row(
+      conn,
+      """
+      SELECT description, stack, domain, repo_url, canonical_path, source, last_synced_at
+      FROM projects WHERE id = '#{id}'
+      """
+    )
+  end
+
+  defp project_metadata(conn, id) do
+    [metadata] = scalar_row(conn, "SELECT metadata FROM projects WHERE id = '#{id}'")
+    Jason.decode!(metadata)
+  end
+
+  defp scalar_row(conn, sql) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+
+    try do
+      {:row, row} = Exqlite.Sqlite3.step(conn, stmt)
+      row
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp index_exists?(conn, index_name) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [index_name])
+    result = Exqlite.Sqlite3.step(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+    result == {:row, [1]}
   end
 end
