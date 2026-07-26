@@ -130,6 +130,72 @@ defmodule Bee.Store.MigrateTest do
     assert %{1 => :baseline, 2 => :fts_rebuild} == Migrate.version_map(migrations)
   end
 
+  test "creates and verifies a VACUUM backup before applying pending migrations", %{
+    conn: conn
+  } do
+    backup_path =
+      Path.join(System.tmp_dir!(), "bee_backup_#{System.unique_integer([:positive])}.db")
+
+    migrations = [
+      {1, :one,
+       fn migration_conn ->
+         Exqlite.Sqlite3.execute(migration_conn, "CREATE TABLE migrated_marker (id INTEGER)")
+       end}
+    ]
+
+    assert :ok =
+             Migrate.run_at_boot(database_path(conn),
+               migrations: migrations,
+               backup_path: backup_path
+             )
+
+    assert File.exists?(backup_path)
+    assert table_exists?(conn, "migrated_marker")
+
+    {:ok, backup_conn} = Exqlite.Sqlite3.open(backup_path)
+    assert {:ok, 0} = Migrate.user_version(backup_conn)
+    assert integrity_check?(backup_conn)
+    refute table_exists?(backup_conn, "migrated_marker")
+    Exqlite.Sqlite3.close(backup_conn)
+
+    on_exit(fn -> File.rm(backup_path) end)
+  end
+
+  test "does not create a backup when no migration is pending", %{conn: conn} do
+    backup_path =
+      Path.join(System.tmp_dir!(), "bee_backup_#{System.unique_integer([:positive])}.db")
+
+    assert :ok =
+             Migrate.run_at_boot(database_path(conn), migrations: [], backup_path: backup_path)
+
+    refute File.exists?(backup_path)
+  end
+
+  test "aborts before migration when the backup target already exists", %{conn: conn} do
+    backup_path =
+      Path.join(System.tmp_dir!(), "bee_backup_#{System.unique_integer([:positive])}.db")
+
+    File.write!(backup_path, "do not overwrite")
+
+    migrations = [
+      {1, :one,
+       fn _migration_conn ->
+         flunk("migration must not run when preflight backup fails")
+       end}
+    ]
+
+    assert {:error, :backup_failed} =
+             Migrate.run_at_boot(database_path(conn),
+               migrations: migrations,
+               backup_path: backup_path
+             )
+
+    assert {:ok, 0} = Migrate.user_version(conn)
+    assert "do not overwrite" = File.read!(backup_path)
+
+    on_exit(fn -> File.rm(backup_path) end)
+  end
+
   defp table_exists?(conn, table_name) do
     {:ok, stmt} =
       Exqlite.Sqlite3.prepare(
@@ -142,5 +208,26 @@ defmodule Bee.Store.MigrateTest do
     Exqlite.Sqlite3.release(conn, stmt)
 
     result == {:row, [1]}
+  end
+
+  defp database_path(conn) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA database_list")
+
+    try do
+      {:row, [_sequence, "main", path]} = Exqlite.Sqlite3.step(conn, stmt)
+      path
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp integrity_check?(conn) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA integrity_check")
+
+    try do
+      Exqlite.Sqlite3.step(conn, stmt) == {:row, ["ok"]}
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
   end
 end
