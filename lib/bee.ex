@@ -30,6 +30,11 @@ defmodule Bee do
     GenServer.call(server, {:count, opts})
   end
 
+  def query(spec, server \\ @default_server) do
+    spec = Bee.Query.Spec.new!(spec)
+    GenServer.call(server, {:query, spec})
+  end
+
   def tree_page(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
     GenServer.call(server, {:tree_page, opts})

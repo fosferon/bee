@@ -6,7 +6,10 @@ defmodule Bee.Query.Classifier do
   @compute_reads [:who_blocks_whom, :agent_load, :bottlenecks]
 
   @spec classify(atom()) :: lane()
-  def classify(read_type) do
+  def classify(read_type) when is_atom(read_type) do
     if read_type in @compute_reads, do: :compute, else: :fast
   end
+
+  @spec classify(Bee.Query.Spec.t()) :: lane()
+  def classify(%Bee.Query.Spec{}), do: :fast
 end

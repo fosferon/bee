@@ -155,6 +155,21 @@ defmodule Bee.Repo do
     end
   end
 
+  def handle_call({:query, spec}, _from, state) do
+    case Bee.Query.Spec.new(spec) do
+      {:ok, spec} ->
+        lane = Bee.Query.Classifier.classify(spec)
+
+        result =
+          read_with_pool(state, lane, fn conn -> Bee.Query.Interpreter.execute(conn, spec) end)
+
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
