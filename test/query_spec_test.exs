@@ -74,6 +74,7 @@ defmodule Bee.QuerySpecTest do
   test "classifier accepts validated query specs", %{server: server} do
     spec = Bee.Query.Spec.new!(status: "open")
     assert Bee.Query.Classifier.classify(spec) == :fast
+    assert :ok = Bee.Query.Classifier.assert_spec_coverage!()
 
     {:ok, _} = Bee.create("Still available", [], server)
     assert {:ok, %{issues: [_]}} = Bee.query(spec, server)
