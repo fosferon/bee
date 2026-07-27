@@ -304,28 +304,8 @@ defmodule Bee.Repo do
 
   defp classify_write_error(reason), do: reason
 
-  defp resolve_id(id, prefix) when is_integer(id), do: "#{prefix}-#{id}"
-
-  defp resolve_id(id, prefix) when is_binary(id) do
-    if String.contains?(id, "-") do
-      id
-    else
-      case Integer.parse(id) do
-        {_n, ""} -> "#{prefix}-#{id}"
-        _ -> id
-      end
-    end
-  end
-
-  defp resolve_id(id, _prefix), do: to_string(id)
-
-  defp format_parent(nil, _prefix), do: nil
-  defp format_parent("", _prefix), do: nil
-  defp format_parent(parent, prefix) when is_integer(parent), do: "#{prefix}-#{parent}"
-
-  defp format_parent(parent, prefix) when is_binary(parent) do
-    if String.contains?(parent, "-"), do: parent, else: "#{prefix}-#{parent}"
-  end
+  defp resolve_id(id, prefix), do: Bee.Id.to_prefixed(id, prefix)
+  defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
 
   defp normalize_update_attrs(attrs, issue_id, state) do
     attrs = Map.new(attrs)

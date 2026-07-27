@@ -802,22 +802,7 @@ defmodule Bee.Store do
     })
   end
 
-  defp parse_numeric_id(id) when is_binary(id) do
-    case String.split(id, "-") do
-      parts when length(parts) >= 2 ->
-        n = List.last(parts)
-
-        case Integer.parse(n) do
-          {num, ""} -> num
-          _ -> id
-        end
-
-      _ ->
-        id
-    end
-  end
-
-  defp parse_numeric_id(id), do: id
+  defp parse_numeric_id(id), do: Bee.Id.parse!(id)
 
   defp get_lock_info(conn, issue_id) do
     {:ok, stmt} =
