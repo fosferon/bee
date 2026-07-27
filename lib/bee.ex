@@ -35,6 +35,27 @@ defmodule Bee do
     GenServer.call(server, {:query, spec})
   end
 
+  def ask(intent, opts \\ [], server \\ @default_server)
+
+  def ask(intent, opts, server) when is_atom(intent) and is_list(opts) do
+    unless Bee.Intent.Core.known?(intent) do
+      raise ArgumentError, "unknown core intent: #{inspect(intent)}"
+    end
+
+    GenServer.call(server, {:ask, intent, opts})
+  end
+
+  def ask(intent, opts, server) when is_binary(intent) and is_list(opts),
+    do: GenServer.call(server, {:ask, intent, opts})
+
+  def ask(_intent, _opts, _server), do: raise(ArgumentError, "invalid intent request")
+
+  def register_intent(name, spec, server \\ @default_server),
+    do: GenServer.call(server, {:register_intent, name, spec})
+
+  def remove_intent(name, server \\ @default_server),
+    do: GenServer.call(server, {:remove_intent, name})
+
   def tree_page(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
     GenServer.call(server, {:tree_page, opts})

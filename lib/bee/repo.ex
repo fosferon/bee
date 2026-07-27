@@ -170,6 +170,26 @@ defmodule Bee.Repo do
     end
   end
 
+  def handle_call({:ask, intent, opts}, _from, state) do
+    result =
+      with {:ok, spec} <- resolve_intent(state.conn, intent, opts) do
+        lane = Bee.Query.Classifier.classify(spec)
+        read_with_pool(state, lane, fn conn -> Bee.Query.Interpreter.execute(conn, spec) end)
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:register_intent, name, spec}, _from, state) do
+    result = Bee.Intent.Registry.register(state.conn, name, spec)
+    {:reply, result, state}
+  end
+
+  def handle_call({:remove_intent, name}, _from, state) do
+    result = Bee.Intent.Registry.remove(state.conn, name)
+    {:reply, result, state}
+  end
+
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
@@ -460,6 +480,14 @@ defmodule Bee.Repo do
   defp classify_write_error(reason), do: reason
 
   defp resolve_id(id, prefix), do: Bee.Id.to_prefixed(id, prefix)
+
+  defp resolve_intent(_conn, intent, opts) when is_atom(intent),
+    do: Bee.Intent.Core.resolve(intent, opts)
+
+  defp resolve_intent(conn, intent, _opts) when is_binary(intent),
+    do: Bee.Intent.Registry.resolve(conn, intent)
+
+  defp resolve_intent(_conn, _intent, _opts), do: {:error, :unknown_intent}
 
   defp read_pool_name(opts) do
     case Keyword.get(opts, :pool_name) do

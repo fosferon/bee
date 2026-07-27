@@ -69,4 +69,20 @@ defmodule Bee.QuerySpecTest do
     {:ok, _} = Bee.create("Still available", [], server)
     assert {:ok, %{issues: [_]}} = Bee.query(spec, server)
   end
+
+  test "core and registered intents resolve through the query interpreter", %{server: server} do
+    {:ok, _} = Bee.register_agent("alice", %{}, server)
+    {:ok, _} = Bee.register_agent("bob", %{}, server)
+    {:ok, alice_issue} = Bee.create("Alice", [], server)
+    {:ok, bob_issue} = Bee.create("Bob", [], server)
+    :ok = Bee.assign(alice_issue.id, "alice", server)
+    :ok = Bee.assign(bob_issue.id, "bob", server)
+
+    assert {:ok, %{issues: [%{title: "Alice"}]}} = Bee.ask(:what_next, [agent: "alice"], server)
+
+    assert :ok = Bee.register_intent("bob_open", [assigned_to: "bob"], server)
+    assert {:ok, %{issues: [%{title: "Bob"}]}} = Bee.ask("bob_open", [], server)
+    assert :ok = Bee.remove_intent("bob_open", server)
+    assert {:error, :unknown_intent} = Bee.ask("bob_open", [], server)
+  end
 end
