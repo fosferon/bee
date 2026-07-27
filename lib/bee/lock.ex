@@ -69,14 +69,49 @@ defmodule Bee.Lock do
   end
 
   @spec sweep_expired(Exqlite.Sqlite3.db()) :: integer()
+  @doc """
+  Sweeps expired locks, emitting one event per expired lock (Story 3.5, AD-19).
+
+  Each lock release and its event emission are one transaction — a released
+  lock no longer matches the "expired AND held" query, so a re-dispatch is
+  a no-op, not a second event (cascade F3).
+  """
   def sweep_expired(conn) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
-    run_sql(conn, "DELETE FROM locks WHERE expires_at < ?", [now])
 
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT changes()")
-    {:row, [changes]} = Exqlite.Sqlite3.step(conn, stmt)
+    # Query all expired locks
+    expired = query_expired_locks(conn, now)
+
+    # For each expired lock: release + emit event in one transaction
+    Enum.each(expired, fn {issue_id, locked_by} ->
+      with :ok <- run_sql(conn, "BEGIN IMMEDIATE", []),
+           :ok <- run_sql(conn, "DELETE FROM locks WHERE issue_id = ?", [issue_id]),
+           :ok <- Bee.Store.insert_event(conn, issue_id, actor: locked_by),
+           :ok <- run_sql(conn, "COMMIT", []) do
+        :ok
+      else
+        {:error, _reason} ->
+          run_sql(conn, "ROLLBACK", [])
+      end
+    end)
+
+    length(expired)
+  end
+
+  defp query_expired_locks(conn, now) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT issue_id, locked_by FROM locks WHERE expires_at < ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, [now])
+
+    rows = collect_rows(conn, stmt, [])
     Exqlite.Sqlite3.release(conn, stmt)
-    changes
+    rows
+  end
+
+  defp collect_rows(conn, stmt, acc) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [issue_id, locked_by]} -> collect_rows(conn, stmt, [{issue_id, locked_by} | acc])
+      :done -> Enum.reverse(acc)
+    end
   end
 
   # Fail soft (GC-3353): surface constraint errors (e.g. a lock referencing a

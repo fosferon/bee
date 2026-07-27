@@ -485,6 +485,31 @@ defmodule Bee.Store do
     exec(conn, "DELETE FROM comments WHERE issue_id = ?", [issue_id])
   end
 
+  @doc """
+  Inserts an event into the events table (AD-7).
+
+  Events are append-only with per-issue sequence numbers.
+  Used by the lock-sweeper to emit one event per expired lock (Story 3.5).
+  """
+  @spec insert_event(Exqlite.Sqlite3.db(), String.t(), keyword()) :: :ok
+  def insert_event(conn, issue_id, opts \\ []) do
+    actor = Keyword.get(opts, :actor)
+    now = now_iso()
+
+    # Get next seq for this issue
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE issue_id = ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
+    {:row, [seq]} = Exqlite.Sqlite3.step(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    exec(conn, "INSERT INTO events (issue_id, seq, actor, created_at) VALUES (?, ?, ?, ?)", [
+      issue_id,
+      seq,
+      actor,
+      now
+    ])
+  end
+
   def insert_comment(conn, issue_id, body, opts \\ []) do
     case get_issue(conn, issue_id) do
       {:ok, _issue} ->

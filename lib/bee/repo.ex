@@ -3,7 +3,6 @@ defmodule Bee.Repo do
   use GenServer
   require Logger
 
-  @lock_sweep_interval_ms 60_000
   @checkpoint_interval_ms 60_000
   @wal_threshold_bytes 10_000_000
   @export_debounce_ms 5_000
@@ -46,7 +45,7 @@ defmodule Bee.Repo do
         Bee.Graph.rebuild(dep_graph, conn)
         Bee.World.rebuild(alloc_graph, conn)
 
-        schedule_lock_sweep()
+        # Sweeper is a separate process (Story 3.5) — no timer needed here.
         schedule_checkpoint()
 
         # Start the reader pool (AD-2, AD-3). When running under
@@ -309,12 +308,12 @@ defmodule Bee.Repo do
 
   def handle_call(:prefix, _from, state), do: {:reply, state.prefix, state}
 
-  @impl true
-  def handle_info(:sweep_locks, state) do
+  def handle_call(:sweep_expired_locks, _from, state) do
+    # Story 3.5: Sweeper dispatches through the writer (no own connection).
+    # One event per expired lock, release + event in one transaction (AD-19).
     swept = Bee.Lock.sweep_expired(state.conn)
-    if swept > 0, do: Logger.info("Swept #{swept} expired locks")
-    schedule_lock_sweep()
-    {:noreply, state}
+    state = schedule_export(state)
+    {:reply, swept, state}
   end
 
   @impl true
@@ -416,10 +415,6 @@ defmodule Bee.Repo do
         Logger.warning("JSONL export crashed: #{inspect(reason)}")
         {:error, {:export_crashed, reason}}
     end
-  end
-
-  defp schedule_lock_sweep do
-    Process.send_after(self(), :sweep_locks, @lock_sweep_interval_ms)
   end
 
   defp schedule_checkpoint do

@@ -963,4 +963,49 @@ defmodule BeeTest do
       File.rm(jsonl)
     end
   end
+
+  describe "AD-19: lock-sweeper contract (Story 3.5)" do
+    test "sweeper dispatches through writer, one event per expired lock" do
+      db_path = Path.join(System.tmp_dir!(), "bee_sweep_#{System.unique_integer([:positive])}.db")
+
+      name = :"bee_sweep_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      # Create an issue and lock it with a very short TTL
+      {:ok, _} = Bee.create("Sweep test", [], pid)
+      {:ok, _} = GenServer.call(pid, {:lock, "test-1", [locked_by: "agent1", ttl: 0]})
+
+      # Wait for the lock to expire
+      Process.sleep(100)
+
+      # Sweep via the writer (as the Sweeper process would do)
+      swept = GenServer.call(pid, :sweep_expired_locks)
+      assert swept == 1
+
+      # Verify the lock is released
+      conn = GenServer.call(pid, :conn)
+      assert Bee.Lock.get(conn, "test-1") == nil
+
+      # Verify an event was emitted
+      {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+      :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+      {:row, [event_count]} = Exqlite.Sqlite3.step(conn, stmt)
+      Exqlite.Sqlite3.release(conn, stmt)
+      assert event_count == 1
+
+      # Re-dispatch should be a no-op (no double-count, cascade F3)
+      swept_again = GenServer.call(pid, :sweep_expired_locks)
+      assert swept_again == 0
+
+      # Event count should still be 1
+      {:ok, stmt2} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+      :ok = Exqlite.Sqlite3.bind(stmt2, ["test-1"])
+      {:row, [event_count2]} = Exqlite.Sqlite3.step(conn, stmt2)
+      Exqlite.Sqlite3.release(conn, stmt2)
+      assert event_count2 == 1
+
+      GenServer.stop(pid)
+      File.rm(db_path)
+    end
+  end
 end
