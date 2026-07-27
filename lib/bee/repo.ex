@@ -557,9 +557,16 @@ defmodule Bee.Repo do
          {:ok, []} <- Bee.Store.list_issues_raw(conn) do
       Logger.info("Seeding from #{jsonl_path}")
       Bee.Export.import_jsonl(conn, jsonl_path, prefix)
-      :ok
     else
-      _ -> :ok
+      false ->
+        :ok
+
+      {:ok, [_ | _]} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to check DB for seeding from #{jsonl_path}: #{inspect(reason)}")
+        :ok
     end
   end
 end

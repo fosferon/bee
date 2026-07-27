@@ -1008,4 +1008,38 @@ defmodule BeeTest do
       File.rm(db_path)
     end
   end
+
+  describe "NFR10: silent-failure invariant (Story 3.6)" do
+    test "exactly three enumerated exceptions exist" do
+      exceptions = Bee.Invariants.silent_failure_exceptions()
+      assert length(exceptions) == 3
+
+      ids = Enum.map(exceptions, & &1.id)
+      assert :sweeper_in_flight_write in ids
+      assert :jsonl_export_window in ids
+      assert :wal_truncate_failure in ids
+    end
+
+    test "each exception has a stated reason and recovery" do
+      Enum.each(Bee.Invariants.silent_failure_exceptions(), fn exc ->
+        assert Map.has_key?(exc, :id)
+        assert Map.has_key?(exc, :reason)
+        assert Map.has_key?(exc, :recovery)
+        assert is_binary(exc.reason) and exc.reason != ""
+        assert is_binary(exc.recovery) and exc.recovery != ""
+      end)
+    end
+
+    test "assert_enumerated!/1 accepts listed exceptions" do
+      assert :ok = Bee.Invariants.assert_enumerated!(:sweeper_in_flight_write)
+      assert :ok = Bee.Invariants.assert_enumerated!(:jsonl_export_window)
+      assert :ok = Bee.Invariants.assert_enumerated!(:wal_truncate_failure)
+    end
+
+    test "assert_enumerated!/1 rejects unlisted failure paths" do
+      assert_raise ArgumentError, fn ->
+        Bee.Invariants.assert_enumerated!(:some_new_silent_failure)
+      end
+    end
+  end
 end
