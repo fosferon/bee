@@ -234,7 +234,7 @@ defmodule Bee.Store.Migrate do
   defp version_gate(_current, _target), do: :ok
 
   defp apply_migration(conn, {version, name, run}) do
-    foreign_keys_disabled? = name == :baseline_normalization
+    foreign_keys_disabled? = name in [:baseline_normalization, :rebuild_dependencies_pk]
 
     with :ok <- maybe_disable_foreign_keys(conn, foreign_keys_disabled?) do
       try do

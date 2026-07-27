@@ -146,18 +146,10 @@ defmodule Bee.Export do
     end
   end
 
-  defp extract_num(id) when is_binary(id) do
-    case String.split(id, "-") do
-      parts when length(parts) >= 2 ->
-        case Integer.parse(List.last(parts)) do
-          {n, ""} -> n
-          _ -> 0
-        end
-
-      _ ->
-        0
+  defp extract_num(id) do
+    case Bee.Id.parse(id) do
+      {:ok, n} -> n
+      {:error, :invalid_id} -> 0
     end
   end
-
-  defp extract_num(_), do: 0
 end
