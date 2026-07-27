@@ -6,6 +6,8 @@ defmodule Bee.Repo do
   @lock_sweep_interval_ms 60_000
   @checkpoint_interval_ms 60_000
   @wal_threshold_bytes 10_000_000
+  @export_debounce_ms 5_000
+  @export_flush_bound_ms 10_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -70,7 +72,8 @@ defmodule Bee.Repo do
            export_mode: :on_write,
            db_path: db_path,
            pool_pid: pool_pid,
-           pool_name: pool_name
+           pool_name: pool_name,
+           export_timer: nil
          }}
 
       {:error, reason} ->
@@ -101,7 +104,7 @@ defmodule Bee.Repo do
     {:ok, issue} = Bee.Store.insert_issue(state.conn, attrs)
     Bee.Graph.add_vertex(state.dep_graph, id)
     Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
-    maybe_export(state)
+    state = schedule_export(state)
     {:reply, {:ok, issue}, state}
   end
 
@@ -183,7 +186,7 @@ defmodule Bee.Repo do
 
     with {:ok, normalized_attrs} <- normalize_update_attrs(attrs, full, state),
          :ok <- Bee.Store.update_issue(state.conn, full, normalized_attrs) do
-      maybe_export(state)
+      state = schedule_export(state)
       {:reply, :ok, state}
     else
       {:error, _reason} = error -> {:reply, error, state}
@@ -195,7 +198,7 @@ defmodule Bee.Repo do
 
     case Bee.Store.insert_comment(state.conn, full, text, opts) do
       :ok ->
-        maybe_export(state)
+        state = schedule_export(state)
         {:reply, :ok, state}
 
       {:error, reason} ->
@@ -210,7 +213,7 @@ defmodule Bee.Repo do
     case Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker) do
       :ok ->
         Bee.Store.insert_dependency(state.conn, full_id, full_blocker)
-        maybe_export(state)
+        state = schedule_export(state)
         {:reply, :ok, state}
 
       {:error, :cycle} ->
@@ -223,7 +226,7 @@ defmodule Bee.Repo do
     full_blocker = resolve_id(blocker_id, state.prefix)
     Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
     Bee.Store.remove_dependency(state.conn, full_id, full_blocker)
-    maybe_export(state)
+    state = schedule_export(state)
     {:reply, :ok, state}
   end
 
@@ -236,14 +239,13 @@ defmodule Bee.Repo do
       Bee.World.add_agent(state.alloc_graph, locked_by)
     end
 
-    result =
+    {result, state} =
       case Bee.Lock.acquire(state.conn, full, opts) do
         {:ok, _} = ok ->
-          maybe_export(state)
-          ok
+          {ok, schedule_export(state)}
 
         {:error, reason} ->
-          {:error, classify_write_error(reason)}
+          {{:error, classify_write_error(reason)}, state}
       end
 
     {:reply, result, state}
@@ -252,7 +254,7 @@ defmodule Bee.Repo do
   def handle_call({:unlock, id}, _from, state) do
     full = resolve_id(id, state.prefix)
     Bee.Lock.release(state.conn, full)
-    maybe_export(state)
+    state = schedule_export(state)
     {:reply, :ok, state}
   end
 
@@ -272,7 +274,7 @@ defmodule Bee.Repo do
     full = resolve_id(issue_id, state.prefix)
     Bee.Agents.assign_issue(state.conn, full, agent_id)
     Bee.World.assign(state.alloc_graph, full, agent_id)
-    maybe_export(state)
+    state = schedule_export(state)
     {:reply, :ok, state}
   end
 
@@ -301,7 +303,7 @@ defmodule Bee.Repo do
     result = Bee.Export.import_jsonl(state.conn, path, state.prefix)
     Bee.Graph.rebuild(state.dep_graph, state.conn)
     Bee.World.rebuild(state.alloc_graph, state.conn)
-    maybe_export(state)
+    state = schedule_export(state)
     {:reply, result, state}
   end
 
@@ -320,6 +322,18 @@ defmodule Bee.Repo do
     :ok = Bee.Store.wal_checkpoint(state.conn, :passive)
     maybe_log_wal_size(state.db_path)
     schedule_checkpoint()
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:flush_export, state) do
+    flush_export(state)
+    {:noreply, %{state | export_timer: nil}}
+  end
+
+  # Trapped exit from linked process (Task.async for flush, pool, etc.)
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, state) do
     {:noreply, state}
   end
 
@@ -347,8 +361,14 @@ defmodule Bee.Repo do
       e -> Logger.warning("TRUNCATE checkpoint at terminate failed: #{inspect(e)}")
     end
 
-    # AD-17: final JSONL flush on orderly/trapped exit
-    maybe_export(state)
+    # AD-17: final JSONL flush on orderly/trapped exit (bounded, atomic)
+    # On brutal kill this does NOT run; the window is lost but recoverable
+    # by re-export since JSONL is derived (Story 3.3 shutdown invariant).
+    if state[:export_timer] do
+      Process.cancel_timer(state[:export_timer])
+    end
+
+    flush_export(state)
 
     Exqlite.Sqlite3.close(state.conn)
     :digraph.delete(state.dep_graph)
@@ -358,14 +378,43 @@ defmodule Bee.Repo do
 
   # --- Helpers ---
 
-  defp maybe_export(%{jsonl_path: nil}), do: :ok
-  defp maybe_export(%{export_mode: :disabled}), do: :ok
+  defp schedule_export(%{jsonl_path: nil} = state), do: state
+  defp schedule_export(%{export_mode: :disabled} = state), do: state
 
-  defp maybe_export(state) do
-    try do
-      Bee.Export.export(state.conn, state.jsonl_path)
-    rescue
-      e -> Logger.warning("JSONL export failed: #{inspect(e)}")
+  defp schedule_export(state) do
+    # Cancel any pending debounce timer
+    if state[:export_timer] do
+      Process.cancel_timer(state[:export_timer])
+    end
+
+    # Schedule a new flush after the debounce period
+    timer = Process.send_after(self(), :flush_export, @export_debounce_ms)
+    %{state | export_timer: timer}
+  end
+
+  defp flush_export(%{jsonl_path: nil}), do: :ok
+  defp flush_export(%{export_mode: :disabled}), do: :ok
+
+  defp flush_export(state) do
+    # Hard bound: run export in a Task with a kill timeout (AD-17, audit A2)
+    # This is a hard bound, not a soft receive...after, because the Task
+    # process is killed if it exceeds the bound regardless of scheduler pressure.
+    task =
+      Task.async(fn ->
+        Bee.Export.export(state.conn, state.jsonl_path)
+      end)
+
+    case Task.yield(task, @export_flush_bound_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, :ok} ->
+        :ok
+
+      nil ->
+        Logger.warning("JSONL export exceeded flush bound (#{@export_flush_bound_ms}ms), skipped")
+        {:error, :flush_bound_exceeded}
+
+      {:exit, reason} ->
+        Logger.warning("JSONL export crashed: #{inspect(reason)}")
+        {:error, {:export_crashed, reason}}
     end
   end
 

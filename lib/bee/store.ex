@@ -168,6 +168,43 @@ defmodule Bee.Store do
     get_issue(conn, id)
   end
 
+  @spec upsert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()}
+  def upsert_issue(conn, attrs) do
+    id = Map.fetch!(attrs, :id)
+
+    sql = """
+    INSERT OR REPLACE INTO issues (id, title, description, status, priority, issue_type,
+                        project_id, assigned_to, parent, created_at, created_by, updated_at,
+                        closed_at, close_reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    exec(conn, sql, [
+      id,
+      Map.fetch!(attrs, :title),
+      Map.get(attrs, :description),
+      Map.get(attrs, :status, "open"),
+      Map.get(attrs, :priority),
+      Map.get(attrs, :issue_type, "task"),
+      Map.get(attrs, :project_id),
+      Map.get(attrs, :assigned_to),
+      Map.get(attrs, :parent),
+      Map.get(attrs, :created_at, now_iso()),
+      Map.get(attrs, :created_by),
+      now_iso(),
+      Map.get(attrs, :closed_at),
+      Map.get(attrs, :close_reason)
+    ])
+
+    # Replace labels: delete existing, insert new
+    exec(conn, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
+
+    labels = Map.get(attrs, :labels, [])
+    Enum.each(labels, fn label -> insert_label(conn, id, label) end)
+
+    get_issue(conn, id)
+  end
+
   @spec get_issue(Exqlite.Sqlite3.db(), String.t(), keyword()) ::
           {:ok, map()} | {:error, :not_found}
   def get_issue(conn, id, opts \\ []) do
@@ -444,6 +481,10 @@ defmodule Bee.Store do
 
   @spec insert_comment(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
           :ok | {:error, :not_found} | {:error, term()}
+  def delete_comments(conn, issue_id) do
+    exec(conn, "DELETE FROM comments WHERE issue_id = ?", [issue_id])
+  end
+
   def insert_comment(conn, issue_id, body, opts \\ []) do
     case get_issue(conn, issue_id) do
       {:ok, _issue} ->

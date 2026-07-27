@@ -5,9 +5,11 @@ defmodule Bee.Supervisor do
   @doc """
   Starts the Bee supervision tree with :rest_for_one semantics (AD-22).
 
-  ## Child order (boot order)
+  ## Boot sequence
 
-  1. **Migrate** (transient Task) — runs pending migrations, exits on success.
+  1. **Migrate** — runs pending migrations synchronously in init/1 before
+     any children start. This prevents race conditions between the Migrate
+     task and the Repo both accessing the DB.
   2. **Repo** (GenServer, traps exits) — writer + graph owner.
   3. **Read.Pool** (Supervisor) — two-lane NimblePool for read-only connections.
   4. **Sweeper** (GenServer) — lock-sweeper (Story 3.5; placeholder here).
@@ -32,12 +34,24 @@ defmodule Bee.Supervisor do
 
   ## :rest_for_one semantics
 
-  If Migrate crashes → restart Migrate, Repo, Pool, Sweeper.
   If Repo crashes    → restart Repo, Pool, Sweeper.
   If Pool crashes    → restart Pool, Sweeper.
   If Sweeper crashes → restart Sweeper only.
+
+  (Migrate runs in init/1, not as a supervised child — it cannot crash
+  independently. If it fails, the supervisor itself fails to start.)
   """
   def start_link(opts) do
+    # Run migrations synchronously before starting the supervision tree.
+    # This prevents race conditions between concurrent DB access.
+    db_path = Keyword.fetch!(opts, :db_path)
+    db_path |> Path.dirname() |> File.mkdir_p!()
+
+    case Bee.Store.Migrate.run_at_boot(db_path) do
+      :ok -> :ok
+      {:error, reason} -> exit({:migration_failed, reason})
+    end
+
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name))
   end
 
@@ -51,16 +65,7 @@ defmodule Bee.Supervisor do
     sweeper_name = Keyword.get(opts, :sweeper_name, :"#{repo_name}.Sweeper")
 
     children = [
-      # Child 1: Migrate (transient — exits on success, restarts on failure)
-      %{
-        id: Bee.MigrateTask,
-        start: {Task, :start_link, [fn -> run_migrate(db_path) end]},
-        restart: :transient,
-        shutdown: :infinity,
-        type: :worker
-      },
-
-      # Child 2: Repo (GenServer, traps exits, :shutdown :infinity for flush bound)
+      # Child 1: Repo (GenServer, traps exits, :shutdown :infinity for flush bound)
       %{
         id: Bee.Repo,
         start:
@@ -80,7 +85,7 @@ defmodule Bee.Supervisor do
         type: :worker
       },
 
-      # Child 3: Read.Pool (Supervisor with two NimblePool children)
+      # Child 2: Read.Pool (Supervisor with two NimblePool children)
       %{
         id: Bee.Read.Pool,
         start: {Bee.Read.Pool, :start_link, [[db_path: db_path, name: pool_name]]},
@@ -88,7 +93,7 @@ defmodule Bee.Supervisor do
         type: :supervisor
       },
 
-      # Child 4: Sweeper (placeholder — Story 3.5 fills this in)
+      # Child 3: Sweeper (placeholder — Story 3.5 fills this in)
       %{
         id: Bee.Store.Locks.Sweeper,
         start: {Bee.Store.Locks.Sweeper, :start_link, [[name: sweeper_name, repo: repo_name]]},
@@ -99,12 +104,5 @@ defmodule Bee.Supervisor do
     ]
 
     Supervisor.init(children, strategy: :rest_for_one, max_restarts: 3, max_seconds: 60)
-  end
-
-  defp run_migrate(db_path) do
-    case Bee.Store.Migrate.run_at_boot(db_path) do
-      :ok -> :ok
-      {:error, reason} -> exit({:migration_failed, reason})
-    end
   end
 end

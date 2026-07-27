@@ -797,9 +797,9 @@ defmodule BeeTest do
           repo_name: repo_name
         )
 
-      # All children should be running
+      # All children should be running (Migrate runs in start_link, not a child)
       children = Supervisor.which_children(sup)
-      assert length(children) == 4
+      assert length(children) == 3
 
       # Repo should be alive and respond to reads
       {:ok, _} = Bee.create("Supervised test", [], repo_name)
@@ -865,6 +865,102 @@ defmodule BeeTest do
 
       Supervisor.stop(sup)
       File.rm(db_path)
+    end
+  end
+
+  describe "AD-17: debounced JSONL export (Story 3.4)" do
+    test "export is debounced — not once per write" do
+      db_path = Path.join(System.tmp_dir!(), "bee_deb_#{System.unique_integer([:positive])}.db")
+      jsonl = Path.join(System.tmp_dir!(), "bee_deb_#{System.unique_integer([:positive])}.jsonl")
+
+      name = :"bee_deb_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      # Multiple writes in rapid succession
+      Bee.create("Issue 1", [], pid)
+      Bee.create("Issue 2", [], pid)
+      Bee.create("Issue 3", [], pid)
+
+      # JSONL should NOT exist yet (debounce hasn't fired)
+      refute File.exists?(jsonl)
+
+      # Wait for debounce to fire (5s default)
+      Process.sleep(6_000)
+
+      # Now the JSONL should exist with all 3 issues
+      assert File.exists?(jsonl)
+      lines = File.read!(jsonl) |> String.split("\n", trim: true)
+      assert length(lines) == 3
+
+      GenServer.stop(pid)
+      File.rm(db_path)
+      File.rm(jsonl)
+    end
+
+    test "import is idempotent — re-importing same trail changes nothing" do
+      db_path = Path.join(System.tmp_dir!(), "bee_idem_#{System.unique_integer([:positive])}.db")
+      jsonl = Path.join(System.tmp_dir!(), "bee_idem_#{System.unique_integer([:positive])}.jsonl")
+
+      name = :"bee_idem_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      # Create test data
+      Bee.create("Idempotent test", [description: "test desc", labels: ["bug"]], pid)
+      GenServer.call(pid, {:comment, "test-1", "A comment", [author: "agent"]})
+
+      # Wait for debounce export
+      Process.sleep(6_000)
+      assert File.exists?(jsonl)
+
+      # Import the JSONL into a fresh DB
+      db_path2 = Path.join(System.tmp_dir!(), "bee_idem2_#{System.unique_integer([:positive])}.db")
+      name2 = :"bee_idem2_#{System.unique_integer([:positive])}"
+      {:ok, pid2} = Bee.Repo.start_link(db_path: db_path2, prefix: "test", jsonl_path: nil, name: name2)
+
+      {:ok, 1} = GenServer.call(pid2, {:import_jsonl, jsonl})
+      {:ok, issue} = GenServer.call(pid2, {:get, 1})
+      assert issue.title == "Idempotent test"
+      assert issue.description == "test desc"
+
+      # Re-import — should be idempotent (no duplicates, no errors)
+      {:ok, 1} = GenServer.call(pid2, {:import_jsonl, jsonl})
+      {:ok, issue2} = GenServer.call(pid2, {:get, 1})
+      assert issue2.title == "Idempotent test"
+
+      # Count should still be 1 (no duplicates)
+      {:ok, count} = GenServer.call(pid2, {:count, []})
+      assert count == 1
+
+      GenServer.stop(pid)
+      GenServer.stop(pid2)
+      File.rm(db_path)
+      File.rm(db_path2)
+      File.rm(jsonl)
+    end
+
+    test "export writes atomically — no half-written trail visible" do
+      db_path = Path.join(System.tmp_dir!(), "bee_atom_#{System.unique_integer([:positive])}.db")
+      jsonl = Path.join(System.tmp_dir!(), "bee_atom_#{System.unique_integer([:positive])}.jsonl")
+
+      name = :"bee_atom_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      Bee.create("Atomic test", [], pid)
+
+      # Wait for debounce
+      Process.sleep(6_000)
+
+      # JSONL should exist and be complete (atomic write via temp + rename)
+      assert File.exists?(jsonl)
+      content = File.read!(jsonl)
+      assert String.contains?(content, "Atomic test")
+
+      # No temp file should remain
+      refute File.exists?(jsonl <> ".tmp")
+
+      GenServer.stop(pid)
+      File.rm(db_path)
+      File.rm(jsonl)
     end
   end
 end

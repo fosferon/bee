@@ -80,8 +80,12 @@ defmodule Bee.Export do
         Jason.encode!(entry)
       end)
 
+    # AD-17: atomic write — temp file + rename, so a reader never sees
+    # a half-written trail (Story 3.4, FR16).
     path |> Path.dirname() |> File.mkdir_p!()
-    File.write!(path, Enum.join(lines, "\n") <> "\n")
+    tmp_path = path <> ".tmp"
+    File.write!(tmp_path, Enum.join(lines, "\n") <> "\n")
+    File.rename!(tmp_path, path)
     :ok
   end
 
@@ -100,6 +104,8 @@ defmodule Bee.Export do
             max(acc, num)
           end)
 
+        # AD-17: idempotent import via upsert — re-importing the same
+        # trail changes nothing (Story 3.4, FR16).
         Enum.each(lines, fn data ->
           id = Map.get(data, "id")
 
@@ -119,11 +125,10 @@ defmodule Bee.Export do
             close_reason: Map.get(data, "close_reason")
           }
 
-          try do
-            Bee.Store.insert_issue(conn, attrs)
-          rescue
-            _ -> :ok
-          end
+          {:ok, _} = Bee.Store.upsert_issue(conn, attrs)
+
+          # Replace comments: delete existing, insert from JSONL
+          Bee.Store.delete_comments(conn, id)
 
           Enum.each(Map.get(data, "comments", []), fn c ->
             Bee.Store.insert_comment(conn, id, Map.get(c, "text", ""),
@@ -131,6 +136,7 @@ defmodule Bee.Export do
             )
           end)
 
+          # Dependencies are already idempotent (INSERT OR IGNORE)
           Enum.each(Map.get(data, "dependencies", []), fn dep ->
             depends_on = Map.get(dep, "depends_on_id")
             if depends_on, do: Bee.Store.insert_dependency(conn, id, depends_on)
