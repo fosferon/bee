@@ -4,7 +4,18 @@ defmodule Bee.Query.Spec do
   @order_columns ~w(created_at updated_at priority id)a
   @order_directions [:asc, :desc]
   @include_relations [:comments]
-  @fields [:status, :project_id, :assigned_to, :labels, :order_by, :limit, :offset, :include]
+  @details [:minimal, :compact, :standard, :full]
+  @fields [
+    :status,
+    :project_id,
+    :assigned_to,
+    :labels,
+    :order_by,
+    :limit,
+    :offset,
+    :include,
+    :detail
+  ]
 
   @enforce_keys [:order_by]
   defstruct status: nil,
@@ -14,7 +25,8 @@ defmodule Bee.Query.Spec do
             order_by: [created_at: :asc, id: :asc],
             limit: nil,
             offset: nil,
-            include: []
+            include: [],
+            detail: :compact
 
   @type t :: %__MODULE__{
           status: String.t() | nil,
@@ -24,7 +36,8 @@ defmodule Bee.Query.Spec do
           order_by: keyword(:asc | :desc),
           limit: pos_integer() | nil,
           offset: non_neg_integer() | nil,
-          include: [:comments]
+          include: [:comments],
+          detail: :minimal | :compact | :standard | :full
         }
 
   @spec fields() :: [atom()]
@@ -76,7 +89,8 @@ defmodule Bee.Query.Spec do
          :ok <- validate_order_by(spec.order_by),
          :ok <- validate_limit(spec.limit),
          :ok <- validate_offset(spec.offset),
-         :ok <- validate_include(spec.include) do
+         :ok <- validate_include(spec.include),
+         :ok <- validate_detail(spec.detail) do
       {:ok, %{spec | order_by: canonical_order(spec.order_by)}}
     end
   end
@@ -139,6 +153,9 @@ defmodule Bee.Query.Spec do
 
   defp validate_include(include), do: {:error, {:invalid_include, include}}
 
+  defp validate_detail(detail) when detail in @details, do: :ok
+  defp validate_detail(detail), do: {:error, {:invalid_detail, detail}}
+
   defp canonical_order([]), do: [id: :asc]
 
   defp canonical_order(order_by) do
@@ -162,4 +179,5 @@ defmodule Bee.Query.Spec do
   defp describe_error({:invalid_limit, value}), do: "invalid limit: #{inspect(value)}"
   defp describe_error({:invalid_offset, value}), do: "invalid offset: #{inspect(value)}"
   defp describe_error({:invalid_include, value}), do: "invalid include: #{inspect(value)}"
+  defp describe_error({:invalid_detail, value}), do: "invalid detail: #{inspect(value)}"
 end

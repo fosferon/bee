@@ -37,13 +37,15 @@ defmodule Bee.Intent.Registry do
       "order_by" => Enum.map(spec.order_by, fn {field, direction} -> [field, direction] end),
       "limit" => spec.limit,
       "offset" => spec.offset,
-      "include" => spec.include
+      "include" => spec.include,
+      "detail" => spec.detail
     }
   end
 
   defp decode_spec(encoded) do
     with {:ok, order_by} <- decode_order_by(Map.get(encoded, "order_by")),
-         {:ok, include} <- decode_atoms(Map.get(encoded, "include", [])) do
+         {:ok, include} <- decode_atoms(Map.get(encoded, "include", [])),
+         {:ok, detail} <- decode_detail(Map.get(encoded, "detail", "compact")) do
       Spec.new(
         status: Map.get(encoded, "status"),
         project_id: Map.get(encoded, "project_id"),
@@ -52,7 +54,8 @@ defmodule Bee.Intent.Registry do
         order_by: order_by,
         limit: Map.get(encoded, "limit"),
         offset: Map.get(encoded, "offset"),
-        include: include
+        include: include,
+        detail: detail
       )
     end
   end
@@ -82,4 +85,12 @@ defmodule Bee.Intent.Registry do
   end
 
   defp decode_atoms(_), do: {:error, :invalid_spec}
+
+  defp decode_detail(detail) when is_binary(detail) do
+    {:ok, String.to_existing_atom(detail)}
+  rescue
+    ArgumentError -> {:error, :invalid_spec}
+  end
+
+  defp decode_detail(detail), do: {:ok, detail}
 end

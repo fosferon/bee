@@ -9,7 +9,7 @@ defmodule Bee.Query.Interpreter do
   def execute(conn, %Spec{} = spec) do
     with {:ok, issues} <- Bee.Store.list_issues(conn, Spec.to_opts(spec)) do
       {withheld, refine} = Bee.Query.Withheld.build(conn, spec, issues)
-      {:ok, %{issues: issues, withheld: withheld, refine: refine}}
+      {:ok, %{issues: Bee.Query.Projection.project(issues, spec), withheld: withheld, refine: refine}}
     end
   end
 end
