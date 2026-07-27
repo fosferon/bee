@@ -14,7 +14,8 @@ defmodule Bee.Query.Spec do
     :limit,
     :offset,
     :include,
-    :detail
+    :detail,
+    :transforms
   ]
 
   @enforce_keys [:order_by]
@@ -26,7 +27,8 @@ defmodule Bee.Query.Spec do
             limit: nil,
             offset: nil,
             include: [],
-            detail: :compact
+            detail: :compact,
+            transforms: %{}
 
   @type t :: %__MODULE__{
           status: String.t() | nil,
@@ -37,7 +39,8 @@ defmodule Bee.Query.Spec do
           limit: pos_integer() | nil,
           offset: non_neg_integer() | nil,
           include: [:comments],
-          detail: :minimal | :compact | :standard | :full
+          detail: :minimal | :compact | :standard | :full,
+          transforms: %{optional(atom()) => {:local, :trim} | {:external, atom()}}
         }
 
   @spec fields() :: [atom()]
@@ -90,7 +93,8 @@ defmodule Bee.Query.Spec do
          :ok <- validate_limit(spec.limit),
          :ok <- validate_offset(spec.offset),
          :ok <- validate_include(spec.include),
-         :ok <- validate_detail(spec.detail) do
+         :ok <- validate_detail(spec.detail),
+         :ok <- validate_transforms(spec.transforms) do
       {:ok, %{spec | order_by: canonical_order(spec.order_by)}}
     end
   end
@@ -156,6 +160,18 @@ defmodule Bee.Query.Spec do
   defp validate_detail(detail) when detail in @details, do: :ok
   defp validate_detail(detail), do: {:error, {:invalid_detail, detail}}
 
+  defp validate_transforms(transforms) when is_map(transforms) do
+    if Enum.all?(transforms, fn
+         {field, {:local, :trim}} when is_atom(field) -> true
+         {field, {:external, name}} when is_atom(field) and is_atom(name) -> true
+         _ -> false
+       end),
+       do: :ok,
+       else: {:error, :invalid_transform}
+  end
+
+  defp validate_transforms(_transforms), do: {:error, :invalid_transform}
+
   defp canonical_order([]), do: [id: :asc]
 
   defp canonical_order(order_by) do
@@ -180,4 +196,5 @@ defmodule Bee.Query.Spec do
   defp describe_error({:invalid_offset, value}), do: "invalid offset: #{inspect(value)}"
   defp describe_error({:invalid_include, value}), do: "invalid include: #{inspect(value)}"
   defp describe_error({:invalid_detail, value}), do: "invalid detail: #{inspect(value)}"
+  defp describe_error(:invalid_transform), do: "invalid transform"
 end

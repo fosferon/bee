@@ -13,7 +13,8 @@ defmodule Bee.Query.Classifier do
     limit: :fast,
     offset: :fast,
     include: :fast,
-    detail: :fast
+    detail: :fast,
+    transforms: :compute
   }
 
   @spec classify(atom()) :: lane()
@@ -22,6 +23,7 @@ defmodule Bee.Query.Classifier do
   end
 
   @spec classify(Bee.Query.Spec.t()) :: lane()
+  def classify(%Bee.Query.Spec{transforms: transforms}) when map_size(transforms) > 0, do: :compute
   def classify(%Bee.Query.Spec{}), do: :fast
 
   @spec field_lanes() :: %{atom() => lane()}

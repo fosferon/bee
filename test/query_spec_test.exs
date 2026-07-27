@@ -107,4 +107,17 @@ defmodule Bee.QuerySpecTest do
     assert {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
   end
+
+  test "external transforms use the compute lane and fail soft", %{server: server} do
+    {:ok, _} = Bee.create("  padded  ", [], server)
+    assert :ok = Bee.Query.Transform.register(:strip, &String.trim/1)
+
+    assert {:ok, %{issues: [%{title: "padded"}], withheld: %{transformed: [_]}}} =
+             Bee.query([transforms: %{title: {:external, :strip}}], server)
+
+    assert :ok = Bee.Query.Transform.remove(:strip)
+
+    assert {:ok, %{issues: [%{title: "  padded  "}], withheld: %{}}} =
+             Bee.query([transforms: %{title: {:external, :strip}}], server)
+  end
 end
