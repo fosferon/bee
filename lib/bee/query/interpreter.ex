@@ -8,7 +8,8 @@ defmodule Bee.Query.Interpreter do
   @spec execute(Exqlite.Sqlite3.db(), Spec.t()) :: {:ok, result()} | {:error, term()}
   def execute(conn, %Spec{} = spec) do
     with {:ok, issues} <- Bee.Store.list_issues(conn, Spec.to_opts(spec)) do
-      {:ok, %{issues: issues, withheld: %{}, refine: []}}
+      {withheld, refine} = Bee.Query.Withheld.build(conn, spec, issues)
+      {:ok, %{issues: issues, withheld: withheld, refine: refine}}
     end
   end
 end

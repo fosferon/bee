@@ -30,10 +30,19 @@ defmodule Bee.QuerySpecTest do
     {:ok, closed} = Bee.create("Closed", [priority: 2], server)
     :ok = Bee.update(closed.id, %{status: "closed"}, server)
 
-    assert {:ok, %{issues: [issue], withheld: %{}, refine: []}} =
+    assert {:ok, %{issues: [issue], withheld: %{relation_omitted: [:comments]}}} =
              Bee.query([status: "open", order_by: [priority: :desc]], server)
 
     assert issue.title == "Open"
+  end
+
+  test "query reports limit truncation and a refinement", %{server: server} do
+    for number <- 1..3, do: {:ok, _} = Bee.create("Issue #{number}", [], server)
+
+    assert {:ok, %{issues: issues, withheld: %{limit: 2}, refine: [limit: nil]}} =
+             Bee.query([limit: 1, include: [:comments]], server)
+
+    assert length(issues) == 1
   end
 
   test "query appends id as a deterministic tie-breaker", %{server: server} do
