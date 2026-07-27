@@ -581,15 +581,18 @@ defmodule Bee.Store do
 
   # --- Dependencies ---
 
-  @spec insert_dependency(Exqlite.Sqlite3.db(), String.t(), String.t()) :: :ok
-  def insert_dependency(conn, issue_id, depends_on_id) do
-    exec(
-      conn,
-      "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, dep_type, created_at) VALUES (?, ?, 'blocks', ?)",
-      [issue_id, depends_on_id, now_iso()]
-    )
-
-    :ok
+  @spec insert_dependency(Exqlite.Sqlite3.db(), String.t(), String.t(), atom()) ::
+          :ok | {:error, :unknown_dep_type | :unwritable_dep_type}
+  def insert_dependency(conn, issue_id, depends_on_id, type \\ :blocks) do
+    with :ok <- Bee.Dependency.Type.validate(type),
+         :ok <-
+           exec(
+             conn,
+             "INSERT OR IGNORE INTO dependencies (issue_id, depends_on_id, dep_type, created_at) VALUES (?, ?, ?, ?)",
+             [issue_id, depends_on_id, Bee.Dependency.Type.storage_name(type), now_iso()]
+           ) do
+      :ok
+    end
   end
 
   @spec remove_dependency(Exqlite.Sqlite3.db(), String.t(), String.t()) :: :ok
