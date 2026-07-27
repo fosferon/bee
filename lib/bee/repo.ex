@@ -4,6 +4,8 @@ defmodule Bee.Repo do
   require Logger
 
   @lock_sweep_interval_ms 60_000
+  @checkpoint_interval_ms 60_000
+  @wal_threshold_bytes 10_000_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -11,6 +13,8 @@ defmodule Bee.Repo do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     db_path = Keyword.fetch!(opts, :db_path)
     prefix = Keyword.fetch!(opts, :prefix)
     jsonl_path = Keyword.get(opts, :jsonl_path)
@@ -32,6 +36,7 @@ defmodule Bee.Repo do
         Bee.World.rebuild(alloc_graph, conn)
 
         schedule_lock_sweep()
+        schedule_checkpoint()
 
         {:ok,
          %{
@@ -40,7 +45,8 @@ defmodule Bee.Repo do
            alloc_graph: alloc_graph,
            prefix: prefix,
            jsonl_path: jsonl_path,
-           export_mode: :on_write
+           export_mode: :on_write,
+           db_path: db_path
          }}
 
       {:error, reason} ->
@@ -269,7 +275,28 @@ defmodule Bee.Repo do
   end
 
   @impl true
+  def handle_info(:checkpoint, state) do
+    :ok = Bee.Store.wal_checkpoint(state.conn, :passive)
+    maybe_log_wal_size(state.db_path)
+    schedule_checkpoint()
+    {:noreply, state}
+  end
+
+  @impl true
   def terminate(_reason, state) do
+    # AD-23: TRUNCATE checkpoint succeeds here because the reader pool
+    # (child 3, started after Repo) is already dead — no persistent
+    # readers hold the WAL. On a brutal kill this does not run; the
+    # next boot's PASSIVE timer recovers.
+    try do
+      Bee.Store.wal_checkpoint(state.conn, :truncate)
+    rescue
+      e -> Logger.warning("TRUNCATE checkpoint at terminate failed: #{inspect(e)}")
+    end
+
+    # AD-17: final JSONL flush on orderly/trapped exit
+    maybe_export(state)
+
     Exqlite.Sqlite3.close(state.conn)
     :digraph.delete(state.dep_graph)
     :digraph.delete(state.alloc_graph)
@@ -291,6 +318,22 @@ defmodule Bee.Repo do
 
   defp schedule_lock_sweep do
     Process.send_after(self(), :sweep_locks, @lock_sweep_interval_ms)
+  end
+
+  defp schedule_checkpoint do
+    Process.send_after(self(), :checkpoint, @checkpoint_interval_ms)
+  end
+
+  defp maybe_log_wal_size(db_path) do
+    wal_path = db_path <> "-wal"
+
+    case File.stat(wal_path) do
+      {:ok, %{size: size}} when size > @wal_threshold_bytes ->
+        Logger.warning("Bee WAL exceeded threshold: #{div(size, 1_000_000)}MB (#{wal_path})")
+
+      _ ->
+        :ok
+    end
   end
 
   # A SQLite FOREIGN KEY violation on a write that references an issue means the

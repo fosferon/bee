@@ -641,6 +641,43 @@ defmodule BeeTest do
     end
   end
 
+  describe "AD-23: per-connection PRAGMAs and checkpoint" do
+    test "configure_pragmas/1 sets all safety PRAGMAs" do
+      path = Path.join(System.tmp_dir!(), "bee_pragma_#{System.unique_integer([:positive])}.db")
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+
+      :ok = Bee.Store.configure_pragmas(conn)
+
+      {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA foreign_keys")
+      {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
+      Exqlite.Sqlite3.release(conn, stmt)
+
+      {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA busy_timeout")
+      {:row, [5000]} = Exqlite.Sqlite3.step(conn, stmt)
+      Exqlite.Sqlite3.release(conn, stmt)
+
+      {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA synchronous")
+      {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
+      Exqlite.Sqlite3.release(conn, stmt)
+
+      Exqlite.Sqlite3.close(conn)
+      File.rm(path)
+    end
+
+    test "wal_checkpoint/2 passive and truncate succeed with no readers" do
+      path = Path.join(System.tmp_dir!(), "bee_ckpt_#{System.unique_integer([:positive])}.db")
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      :ok = Bee.Store.configure_pragmas(conn)
+      :ok = Bee.Store.init_schema(conn)
+
+      assert :ok = Bee.Store.wal_checkpoint(conn, :passive)
+      assert :ok = Bee.Store.wal_checkpoint(conn, :truncate)
+
+      Exqlite.Sqlite3.close(conn)
+      File.rm(path)
+    end
+  end
+
   defp sqlite_table_exists?(conn, table_name) do
     {:ok, stmt} =
       Exqlite.Sqlite3.prepare(

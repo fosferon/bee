@@ -6,9 +6,7 @@ defmodule Bee.Store do
 
   @spec init_schema(Exqlite.Sqlite3.db()) :: :ok
   def init_schema(conn) do
-    Exqlite.Sqlite3.execute(conn, "PRAGMA journal_mode=WAL")
-    Exqlite.Sqlite3.execute(conn, "PRAGMA foreign_keys=ON")
-    Exqlite.Sqlite3.execute(conn, "PRAGMA synchronous=NORMAL")
+    :ok = configure_pragmas(conn)
 
     statements = [
       """
@@ -106,6 +104,34 @@ defmodule Bee.Store do
     end)
 
     :ok
+  end
+
+  @doc """
+  Sets WAL mode and safety PRAGMAs on any connection (AD-23).
+
+  Every connection — writer, reader, or migration — must call this on open.
+  WAL mode is database-level (set once), but foreign_keys, busy_timeout,
+  and synchronous are per-connection and must be set explicitly.
+  """
+  @spec configure_pragmas(Exqlite.Sqlite3.db()) :: :ok
+  def configure_pragmas(conn) do
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA journal_mode=WAL")
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA foreign_keys=ON")
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA busy_timeout=5000")
+    :ok = Exqlite.Sqlite3.execute(conn, "PRAGMA synchronous=NORMAL")
+    :ok
+  end
+
+  @doc """
+  Runs a WAL checkpoint (AD-23).
+
+  - `:passive` — makes incremental progress; used on a timer.
+  - `:truncate` — truncates the WAL back to zero; succeeds only when no
+    readers hold the WAL (used at shutdown after the pool is gone).
+  """
+  @spec wal_checkpoint(Exqlite.Sqlite3.db(), :passive | :truncate) :: :ok | {:error, term()}
+  def wal_checkpoint(conn, mode) when mode in [:passive, :truncate] do
+    Exqlite.Sqlite3.execute(conn, "PRAGMA wal_checkpoint(#{mode})")
   end
 
   # --- Issue CRUD ---
