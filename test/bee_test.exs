@@ -51,9 +51,19 @@ defmodule BeeTest do
       Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
     {:ok, conn} = Exqlite.Sqlite3.open(db_path)
-    assert {:ok, 2} = Bee.Store.Migrate.user_version(conn)
+    assert {:ok, 5} = Bee.Store.Migrate.user_version(conn)
     assert sqlite_table_exists?(conn, "issues_fts")
     refute sqlite_table_exists?(conn, "labels")
+    # Migration 002: issues.metadata
+    assert sqlite_column_exists?(conn, "issues", "metadata")
+    # Migration 003: events, measurements, intents, measures, intent_usage
+    assert sqlite_table_exists?(conn, "events")
+    assert sqlite_table_exists?(conn, "measurements")
+    assert sqlite_table_exists?(conn, "intents")
+    assert sqlite_table_exists?(conn, "measures")
+    assert sqlite_table_exists?(conn, "intent_usage")
+    # Migration 004: dependencies PK is (issue_id, depends_on_id, dep_type)
+    assert sqlite_index_exists?(conn, "idx_dependencies_reverse")
     Exqlite.Sqlite3.close(conn)
     GenServer.stop(pid)
     File.rm_rf!(dir)
@@ -639,6 +649,42 @@ defmodule BeeTest do
       )
 
     :ok = Exqlite.Sqlite3.bind(stmt, [table_name])
+
+    try do
+      Exqlite.Sqlite3.step(conn, stmt) == {:row, [1]}
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp sqlite_column_exists?(conn, table, column) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA table_info(#{table})")
+
+    try do
+      column_exists?(conn, stmt, column)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp column_exists?(conn, stmt, column) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [_cid, name | _]} ->
+        if name == column, do: true, else: column_exists?(conn, stmt, column)
+
+      :done ->
+        false
+    end
+  end
+
+  defp sqlite_index_exists?(conn, index_name) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [index_name])
 
     try do
       Exqlite.Sqlite3.step(conn, stmt) == {:row, [1]}

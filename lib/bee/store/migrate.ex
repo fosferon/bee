@@ -88,13 +88,28 @@ defmodule Bee.Store.Migrate do
   )
 
   @spec migrations() :: [migration()]
-  def migrations, do: [migration_000(), migration_001()]
+  def migrations, do: [
+    migration_000(),
+    migration_001(),
+    migration_002(),
+    migration_003(),
+    migration_004()
+  ]
 
   @spec migration_000() :: migration()
   def migration_000, do: {1, :baseline_normalization, &normalize_baseline/1}
 
   @spec migration_001() :: migration()
   def migration_001, do: {2, :fts_rebuild_and_labels_merge, &rebuild_fts_and_merge_labels/1}
+
+  @spec migration_002() :: migration()
+  def migration_002, do: {3, :add_issues_metadata, &add_issues_metadata/1}
+
+  @spec migration_003() :: migration()
+  def migration_003, do: {4, :add_events_measurements_intents, &add_events_measurements_intents/1}
+
+  @spec migration_004() :: migration()
+  def migration_004, do: {5, :rebuild_dependencies_pk, &rebuild_dependencies_pk/1}
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
           {:ok, :fresh | :devman | :gc_daemon} | {:error, :unknown_baseline}
@@ -355,6 +370,109 @@ defmodule Bee.Store.Migrate do
       :ok -> verify_fts_row_count(conn)
       :error -> {:error, :fts_rebuild_failed}
       {:error, _reason} -> {:error, :fts_rebuild_failed}
+    end
+  end
+
+  # --- Migration 002: issues.metadata (AD-14) ---
+
+  defp add_issues_metadata(conn) do
+    execute(conn, "ALTER TABLE issues ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+  end
+
+  # --- Migration 003: events, measurements, intents, measures, intent_usage (AD-7, AD-9, AD-5, AD-20) ---
+
+  defp add_events_measurements_intents(conn) do
+    statements = [
+      """
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE RESTRICT,
+        seq INTEGER NOT NULL,
+        actor TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(issue_id, seq)
+      )
+      """,
+      """
+      CREATE TABLE measurements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE RESTRICT,
+        seq INTEGER NOT NULL,
+        measure TEXT NOT NULL,
+        value REAL NOT NULL,
+        unit TEXT NOT NULL,
+        dims TEXT NOT NULL DEFAULT '{}',
+        source TEXT,
+        recorded_at TEXT NOT NULL,
+        UNIQUE(issue_id, seq)
+      )
+      """,
+      """
+      CREATE TABLE intents (
+        name TEXT PRIMARY KEY,
+        spec_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+      """,
+      """
+      CREATE TABLE measures (
+        name TEXT PRIMARY KEY,
+        unit TEXT NOT NULL,
+        registered_at TEXT NOT NULL
+      )
+      """,
+      """
+      CREATE TABLE intent_usage (
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT,
+        PRIMARY KEY (name, kind)
+      )
+      """,
+      "INSERT OR IGNORE INTO measures (name, unit, registered_at) VALUES ('effort', 'minutes', datetime('now'))"
+    ]
+
+    case Enum.reduce_while(statements, :ok, fn sql, :ok ->
+           case execute(conn, sql) do
+             :ok -> {:cont, :ok}
+             {:error, _reason} -> {:halt, :error}
+           end
+         end) do
+      :ok -> :ok
+      :error -> {:error, :events_measurements_intents_failed}
+      {:error, _reason} -> {:error, :events_measurements_intents_failed}
+    end
+  end
+
+  # --- Migration 004: dependencies PK rebuild (AD-16) ---
+
+  defp rebuild_dependencies_pk(conn) do
+    statements = [
+      """
+      CREATE TABLE dependencies_new (
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        depends_on_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        dep_type TEXT NOT NULL DEFAULT 'blocks',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (issue_id, depends_on_id, dep_type)
+      )
+      """,
+      "INSERT INTO dependencies_new SELECT * FROM dependencies",
+      "DROP TABLE dependencies",
+      "ALTER TABLE dependencies_new RENAME TO dependencies",
+      "CREATE INDEX idx_dependencies_reverse ON dependencies (depends_on_id, dep_type)"
+    ]
+
+    case Enum.reduce_while(statements, :ok, fn sql, :ok ->
+           case execute(conn, sql) do
+             :ok -> {:cont, :ok}
+             {:error, _reason} -> {:halt, :error}
+           end
+         end) do
+      :ok -> :ok
+      :error -> {:error, :dependencies_pk_rebuild_failed}
+      {:error, _reason} -> {:error, :dependencies_pk_rebuild_failed}
     end
   end
 

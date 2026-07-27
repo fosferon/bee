@@ -302,6 +302,196 @@ defmodule Bee.Store.MigrateTest do
     assert 1 == scalar(conn, "SELECT COUNT(*) FROM issues_fts WHERE issues_fts MATCH 'run'")
   end
 
+  test "migration 002 adds issues.metadata column with NOT NULL DEFAULT", %{conn: conn} do
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+
+    assert {:ok, 5} = Migrate.user_version(conn)
+    assert column_exists?(conn, "issues", "metadata")
+    assert "TEXT" == column_type(conn, "issues", "metadata")
+    assert "'{}'" == column_default(conn, "issues", "metadata")
+  end
+
+  test "migration 003 creates events, measurements, intents, measures, intent_usage and seeds effort", %{
+    conn: conn
+  } do
+    assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000(), Migrate.migration_001()])
+
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+
+    assert {:ok, 5} = Migrate.user_version(conn)
+    assert table_exists?(conn, "events")
+    assert table_exists?(conn, "measurements")
+    assert table_exists?(conn, "intents")
+    assert table_exists?(conn, "measures")
+    assert table_exists?(conn, "intent_usage")
+
+    assert 1 == scalar(conn, "SELECT COUNT(*) FROM measures WHERE name = 'effort' AND unit = 'minutes'")
+    assert "minutes" == scalar(conn, "SELECT unit FROM measures WHERE name = 'effort'")
+  end
+
+  test "migration 003 seed effort is idempotent across full ladder runs", %{conn: conn} do
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+    assert 1 == scalar(conn, "SELECT COUNT(*) FROM measures WHERE name = 'effort'")
+
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+    assert 1 == scalar(conn, "SELECT COUNT(*) FROM measures WHERE name = 'effort'")
+  end
+
+  test "migration 003 events FK enforces ON DELETE RESTRICT", %{conn: conn} do
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO issues (id, title, status, issue_type, created_at, updated_at)
+        VALUES ('GC-1', 'Test', 'open', 'task', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        "INSERT INTO events (issue_id, seq, actor, created_at) VALUES ('GC-1', 1, 'test', '2026-01-01T00:00:00Z')"
+      )
+
+    assert {:error, _} =
+             Exqlite.Sqlite3.execute(conn, "DELETE FROM issues WHERE id = 'GC-1'")
+  end
+
+  test "migration 004 rebuilds dependencies PK to (issue_id, depends_on_id, dep_type)", %{
+    conn: conn
+  } do
+    assert :ok =
+             Migrate.run(conn,
+               migrations: [Migrate.migration_000(), Migrate.migration_001(), Migrate.migration_002()]
+             )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO issues (id, title, status, issue_type, created_at, updated_at)
+        VALUES ('GC-1', 'A', 'open', 'task', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO issues (id, title, status, issue_type, created_at, updated_at)
+        VALUES ('GC-2', 'B', 'open', 'task', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO dependencies (issue_id, depends_on_id, dep_type, created_at)
+        VALUES ('GC-1', 'GC-2', 'blocks', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+
+    assert {:ok, 5} = Migrate.user_version(conn)
+    assert 1 == scalar(conn, "SELECT COUNT(*) FROM dependencies")
+    assert ["GC-2"] == dependency_targets(conn, "GC-1")
+    assert index_exists?(conn, "idx_dependencies_reverse")
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        conn,
+        """
+        INSERT INTO dependencies (issue_id, depends_on_id, dep_type, created_at)
+        VALUES ('GC-1', 'GC-2', 'related', '2026-01-01T00:00:00Z')
+        """
+      )
+
+    assert 2 ==
+             scalar(
+               conn,
+               "SELECT COUNT(*) FROM dependencies WHERE issue_id = 'GC-1' AND depends_on_id = 'GC-2'"
+             )
+  end
+
+  test "full migration ladder reaches version 5 on a fresh database", %{conn: conn} do
+    assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
+    assert {:ok, 5} = Migrate.user_version(conn)
+    assert table_exists?(conn, "events")
+    assert table_exists?(conn, "measurements")
+    assert table_exists?(conn, "intents")
+    assert table_exists?(conn, "measures")
+    assert table_exists?(conn, "intent_usage")
+    assert index_exists?(conn, "idx_dependencies_reverse")
+    assert column_exists?(conn, "issues", "metadata")
+  end
+
+  defp column_exists?(conn, table, column) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA table_info(#{table})")
+
+    try do
+      column_loop(conn, stmt, column)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp column_loop(conn, stmt, column) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [_cid, name | _]} -> name == column or column_loop(conn, stmt, column)
+      :done -> false
+    end
+  end
+
+  defp column_type(conn, table, column) do
+    {:row, [_cid, _name, type | _rest]} = find_column_row(conn, table, column)
+    type
+  end
+
+  defp column_default(conn, table, column) do
+    {:row, [_cid, _name, _type, _not_null, default | _rest]} = find_column_row(conn, table, column)
+    default
+  end
+
+  defp find_column_row(conn, table, column) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "PRAGMA table_info(#{table})")
+
+    try do
+      find_column_loop(conn, stmt, column)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp find_column_loop(conn, stmt, column) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [_cid, name | _] = row} when name == column -> {:row, row}
+      {:row, _} -> find_column_loop(conn, stmt, column)
+      :done -> flunk("column #{column} not found in table")
+    end
+  end
+
+  defp dependency_targets(conn, issue_id) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT depends_on_id FROM dependencies WHERE issue_id = ? ORDER BY depends_on_id"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
+
+    try do
+      Stream.repeatedly(fn -> Exqlite.Sqlite3.step(conn, stmt) end)
+      |> Enum.take_while(&match?({:row, _}, &1))
+      |> Enum.map(fn {:row, [id]} -> id end)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
   defp table_exists?(conn, table_name) do
     {:ok, stmt} =
       Exqlite.Sqlite3.prepare(
