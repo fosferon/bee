@@ -177,6 +177,8 @@ defmodule Bee.Repo do
         read_with_pool(state, lane, fn conn -> Bee.Query.Interpreter.execute(conn, spec) end)
       end
 
+    if match?({:ok, _}, result), do: record_intent_usage_async(self(), intent)
+
     {:reply, result, state}
   end
 
@@ -372,6 +374,12 @@ defmodule Bee.Repo do
   end
 
   @impl true
+  def handle_cast({:record_intent_usage, name, kind}, state) do
+    _ = Bee.Store.Intents.record_usage(state.conn, name, kind)
+    {:noreply, state}
+  end
+
+  @impl true
   def terminate(_reason, state) do
     # AD-23: Stop the reader pool first (if we own it) so all read
     # connections release the WAL before the writer's TRUNCATE checkpoint.
@@ -488,6 +496,16 @@ defmodule Bee.Repo do
     do: Bee.Intent.Registry.resolve(conn, intent)
 
   defp resolve_intent(_conn, _intent, _opts), do: {:error, :unknown_intent}
+
+  defp record_intent_usage_async(repo, intent) do
+    {name, kind} =
+      case intent do
+        intent when is_atom(intent) -> {Atom.to_string(intent), "core"}
+        intent when is_binary(intent) -> {intent, "registered"}
+      end
+
+    Task.start(fn -> GenServer.cast(repo, {:record_intent_usage, name, kind}) end)
+  end
 
   defp read_pool_name(opts) do
     case Keyword.get(opts, :pool_name) do

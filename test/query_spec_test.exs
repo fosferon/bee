@@ -94,4 +94,16 @@ defmodule Bee.QuerySpecTest do
     assert :ok = Bee.remove_intent("bob_open", server)
     assert {:error, :unknown_intent} = Bee.ask("bob_open", [], server)
   end
+
+  test "successful intents record usage asynchronously", %{server: server} do
+    {:ok, _} = Bee.create("Open", [], server)
+    assert {:ok, _} = Bee.ask(:what_next, [], server)
+
+    Process.sleep(25)
+    conn = GenServer.call(server, :conn)
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT count FROM intent_usage WHERE name = ? AND kind = ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, ["what_next", "core"])
+    assert {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+  end
 end

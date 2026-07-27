@@ -30,6 +30,19 @@ defmodule Bee.Store.Intents do
   @spec delete(Exqlite.Sqlite3.db(), String.t()) :: :ok
   def delete(conn, name), do: execute(conn, "DELETE FROM intents WHERE name = ?", [name])
 
+  @spec record_usage(Exqlite.Sqlite3.db(), String.t(), String.t()) :: :ok | {:error, term()}
+  def record_usage(conn, name, kind) do
+    sql = """
+    INSERT INTO intent_usage (name, kind, count, last_used_at)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT(name, kind) DO UPDATE SET
+      count = intent_usage.count + 1,
+      last_used_at = excluded.last_used_at
+    """
+
+    execute(conn, sql, [name, kind, DateTime.utc_now() |> DateTime.to_iso8601()])
+  end
+
   defp execute(conn, sql, params) do
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
     :ok = Exqlite.Sqlite3.bind(stmt, params)
