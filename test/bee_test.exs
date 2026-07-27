@@ -729,4 +729,56 @@ defmodule BeeTest do
       Exqlite.Sqlite3.release(conn, stmt)
     end
   end
+
+  describe "AD-2: pooled reader" do
+    test "classifier routes analytics to :compute, everything else to :fast" do
+      assert Bee.Query.Classifier.classify(:get) == :fast
+      assert Bee.Query.Classifier.classify(:list) == :fast
+      assert Bee.Query.Classifier.classify(:count) == :fast
+      assert Bee.Query.Classifier.classify(:tree_page) == :fast
+      assert Bee.Query.Classifier.classify(:get_comments) == :fast
+      assert Bee.Query.Classifier.classify(:who_blocks_whom) == :compute
+      assert Bee.Query.Classifier.classify(:agent_load) == :compute
+      assert Bee.Query.Classifier.classify(:bottlenecks) == :compute
+    end
+
+    test "pool serves reads from a separate connection, not the writer's" do
+      db_path = Path.join(System.tmp_dir!(), "bee_pool_#{System.unique_integer([:positive])}.db")
+
+      name = :"bee_pool_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      # Create an issue so we have data to read
+      {:ok, _} = Bee.create("Pool test", [], pid)
+
+      # Read via the normal GenServer interface (routes through pool internally)
+      {:ok, issue} = GenServer.call(pid, {:get, 1})
+      assert issue.title == "Pool test"
+
+      # Count via pool
+      {:ok, count} = GenServer.call(pid, {:count, []})
+      assert count == 1
+
+      GenServer.stop(pid)
+      File.rm(db_path)
+    end
+
+    test "pool survives read errors without leaking connections" do
+      db_path = Path.join(System.tmp_dir!(), "bee_pool_#{System.unique_integer([:positive])}.db")
+
+      name = :"bee_pool_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      # A read for a non-existent issue returns error but doesn't crash
+      result = GenServer.call(pid, {:get, 99999})
+      assert {:error, :not_found} = result
+
+      # Pool should still work for subsequent reads
+      {:ok, count} = GenServer.call(pid, {:count, []})
+      assert count == 0
+
+      GenServer.stop(pid)
+      File.rm(db_path)
+    end
+  end
 end

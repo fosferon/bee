@@ -38,6 +38,12 @@ defmodule Bee.Repo do
         schedule_lock_sweep()
         schedule_checkpoint()
 
+        # Start the reader pool (AD-2, AD-3). Linked for now;
+        # Story 3.3 moves it under Bee.Supervisor with :rest_for_one.
+        pool_name = read_pool_name(opts)
+        {:ok, pool_pid} =
+          Bee.Read.Pool.start_link(db_path: db_path, name: pool_name)
+
         {:ok,
          %{
            conn: conn,
@@ -46,7 +52,9 @@ defmodule Bee.Repo do
            prefix: prefix,
            jsonl_path: jsonl_path,
            export_mode: :on_write,
-           db_path: db_path
+           db_path: db_path,
+           pool_pid: pool_pid,
+           pool_name: pool_name
          }}
 
       {:error, reason} ->
@@ -83,14 +91,18 @@ defmodule Bee.Repo do
 
   def handle_call({:get, id}, _from, state) do
     full = resolve_id(id, state.prefix)
-    {:reply, Bee.Store.get_issue(state.conn, full), state}
+    lane = Bee.Query.Classifier.classify(:get)
+    result = read_with_pool(state, lane, fn conn -> Bee.Store.get_issue(conn, full) end)
+    {:reply, result, state}
   end
 
   def handle_call({:get, id, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         full = resolve_id(id, state.prefix)
-        {:reply, Bee.Store.get_issue(state.conn, full, opts), state}
+        lane = Bee.Query.Classifier.classify(:get)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.get_issue(conn, full, opts) end)
+        {:reply, result, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -99,26 +111,39 @@ defmodule Bee.Repo do
 
   def handle_call({:get_comments, id}, _from, state) do
     full = resolve_id(id, state.prefix)
-    {:reply, {:ok, Bee.Store.get_comments(state.conn, full)}, state}
+    lane = Bee.Query.Classifier.classify(:get_comments)
+    result = read_with_pool(state, lane, fn conn -> {:ok, Bee.Store.get_comments(conn, full)} end)
+    {:reply, result, state}
   end
 
   def handle_call({:list, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
-      :ok -> {:reply, Bee.Store.list_issues(state.conn, opts), state}
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:list)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.list_issues(conn, opts) end)
+        {:reply, result, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:count, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
-      :ok -> {:reply, Bee.Store.count_issues(state.conn, opts), state}
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:count)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.count_issues(conn, opts) end)
+        {:reply, result, state}
+
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
-      :ok -> {:reply, Bee.Store.list_tree_page(state.conn, opts), state}
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:tree_page)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.list_tree_page(conn, opts) end)
+        {:reply, result, state}
+
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -284,10 +309,19 @@ defmodule Bee.Repo do
 
   @impl true
   def terminate(_reason, state) do
+    # AD-23: Stop the reader pool first so all read connections release
+    # the WAL before the writer's TRUNCATE checkpoint. On a brutal kill
+    # this does not run; the next boot's PASSIVE timer recovers.
+    if Map.has_key?(state, :pool_pid) and is_pid(state[:pool_pid]) do
+      try do
+        Supervisor.stop(state.pool_pid, :shutdown)
+      rescue
+        e -> Logger.warning("Pool stop at terminate failed: #{inspect(e)}")
+      end
+    end
+
     # AD-23: TRUNCATE checkpoint succeeds here because the reader pool
-    # (child 3, started after Repo) is already dead — no persistent
-    # readers hold the WAL. On a brutal kill this does not run; the
-    # next boot's PASSIVE timer recovers.
+    # is now dead — no persistent readers hold the WAL.
     try do
       Bee.Store.wal_checkpoint(state.conn, :truncate)
     rescue
@@ -348,6 +382,38 @@ defmodule Bee.Repo do
   defp classify_write_error(reason), do: reason
 
   defp resolve_id(id, prefix), do: Bee.Id.to_prefixed(id, prefix)
+
+  defp read_pool_name(opts) do
+    base = Keyword.get(opts, :name, Bee.Repo)
+    :"#{base}.ReadPool"
+  end
+
+  defp read_with_pool(state, lane, fun) do
+    case state do
+      %{pool_pid: pid, pool_name: pool_name} when is_pid(pid) ->
+        actual_pool =
+          case lane do
+            :fast -> Bee.Read.Pool.fast_pool_name(pool_name)
+            :compute -> Bee.Read.Pool.compute_pool_name(pool_name)
+          end
+
+        NimblePool.checkout!(
+          actual_pool,
+          nil,
+          fn _from, conn ->
+            try do
+              {fun.(conn), conn}
+            rescue
+              e -> {{:error, {:read_failed, e}}, conn}
+            end
+          end,
+          :infinity
+        )
+
+      _ ->
+        fun.(state.conn)
+    end
+  end
   defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
 
   defp normalize_update_attrs(attrs, issue_id, state) do

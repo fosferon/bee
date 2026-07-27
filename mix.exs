@@ -20,7 +20,8 @@ defmodule Bee.MixProject do
   defp deps do
     [
       {:exqlite, "~> 0.34"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:nimble_pool, "~> 1.1"}
     ]
   end
 end
