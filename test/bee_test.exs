@@ -781,4 +781,90 @@ defmodule BeeTest do
       File.rm(db_path)
     end
   end
+
+  describe "AD-22: supervision tree (Story 3.3)" do
+    test "Bee.Supervisor boots all children in order and reads work" do
+      db_path = Path.join(System.tmp_dir!(), "bee_sup_#{System.unique_integer([:positive])}.db")
+      sup_name = :"bee_sup_#{System.unique_integer([:positive])}"
+      repo_name = :"#{sup_name}.Repo"
+
+      {:ok, sup} =
+        Bee.Supervisor.start_link(
+          db_path: db_path,
+          prefix: "test",
+          jsonl_path: nil,
+          name: sup_name,
+          repo_name: repo_name
+        )
+
+      # All children should be running
+      children = Supervisor.which_children(sup)
+      assert length(children) == 4
+
+      # Repo should be alive and respond to reads
+      {:ok, _} = Bee.create("Supervised test", [], repo_name)
+      {:ok, issue} = GenServer.call(repo_name, {:get, 1})
+      assert issue.title == "Supervised test"
+
+      # Pool should be a separate child process
+      pool_name = :"#{repo_name}.ReadPool"
+      assert GenServer.whereis(pool_name) != nil
+
+      # Sweeper should be running
+      sweeper_name = :"#{repo_name}.Sweeper"
+      assert GenServer.whereis(sweeper_name) != nil
+
+      Supervisor.stop(sup)
+      File.rm(db_path)
+    end
+
+    test ":rest_for_one restarts Pool and Sweeper when Repo crashes" do
+      db_path = Path.join(System.tmp_dir!(), "bee_rf_#{System.unique_integer([:positive])}.db")
+      sup_name = :"bee_rf_#{System.unique_integer([:positive])}"
+      repo_name = :"#{sup_name}.Repo"
+
+      {:ok, sup} =
+        Bee.Supervisor.start_link(
+          db_path: db_path,
+          prefix: "test",
+          jsonl_path: nil,
+          name: sup_name,
+          repo_name: repo_name
+        )
+
+      # Get initial PIDs
+      pool_name = :"#{repo_name}.ReadPool"
+      initial_pool = GenServer.whereis(pool_name)
+      sweeper_name = :"#{repo_name}.Sweeper"
+      initial_sweeper = GenServer.whereis(sweeper_name)
+
+      # Kill Repo (simulates a crash)
+      repo_pid = GenServer.whereis(repo_name)
+      ref = Process.monitor(repo_pid)
+      Process.exit(repo_pid, :kill)
+
+      # Wait for Repo to die and restart
+      receive do
+        {:DOWN, ^ref, :process, ^repo_pid, _} -> :ok
+      after
+        5_000 -> flunk("Repo didn't die")
+      end
+
+      # Give supervisor time to restart children
+      Process.sleep(500)
+
+      # Repo should be back
+      assert GenServer.whereis(repo_name) != nil
+
+      # Pool and Sweeper should have been restarted (new PIDs)
+      assert GenServer.whereis(pool_name) != nil
+      assert GenServer.whereis(pool_name) != initial_pool
+
+      assert GenServer.whereis(sweeper_name) != nil
+      assert GenServer.whereis(sweeper_name) != initial_sweeper
+
+      Supervisor.stop(sup)
+      File.rm(db_path)
+    end
+  end
 end

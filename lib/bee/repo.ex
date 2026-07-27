@@ -21,7 +21,16 @@ defmodule Bee.Repo do
 
     db_path |> Path.dirname() |> File.mkdir_p!()
 
-    case Bee.Store.Migrate.run_at_boot(db_path) do
+    skip_migration? = Keyword.get(opts, :skip_migration?, false)
+
+    migration_result =
+      if skip_migration? do
+        :ok
+      else
+        Bee.Store.Migrate.run_at_boot(db_path)
+      end
+
+    case migration_result do
       :ok ->
         {:ok, conn} = Exqlite.Sqlite3.open(db_path)
         :ok = Bee.Store.init_schema(conn)
@@ -38,11 +47,18 @@ defmodule Bee.Repo do
         schedule_lock_sweep()
         schedule_checkpoint()
 
-        # Start the reader pool (AD-2, AD-3). Linked for now;
-        # Story 3.3 moves it under Bee.Supervisor with :rest_for_one.
+        # Start the reader pool (AD-2, AD-3). When running under
+        # Bee.Supervisor (start_pool?: false), the pool is a separate
+        # child. When standalone (tests), Repo starts it internally.
         pool_name = read_pool_name(opts)
-        {:ok, pool_pid} =
-          Bee.Read.Pool.start_link(db_path: db_path, name: pool_name)
+        start_pool? = Keyword.get(opts, :start_pool?, true)
+        pool_pid =
+          if start_pool? do
+            {:ok, pid} = Bee.Read.Pool.start_link(db_path: db_path, name: pool_name)
+            pid
+          else
+            nil
+          end
 
         {:ok,
          %{
@@ -309,12 +325,15 @@ defmodule Bee.Repo do
 
   @impl true
   def terminate(_reason, state) do
-    # AD-23: Stop the reader pool first so all read connections release
-    # the WAL before the writer's TRUNCATE checkpoint. On a brutal kill
-    # this does not run; the next boot's PASSIVE timer recovers.
-    if Map.has_key?(state, :pool_pid) and is_pid(state[:pool_pid]) do
+    # AD-23: Stop the reader pool first (if we own it) so all read
+    # connections release the WAL before the writer's TRUNCATE checkpoint.
+    # Under Bee.Supervisor, the pool is a separate child that dies first
+    # via reverse-order shutdown — so we only stop it here if we started it.
+    pool_pid = Map.get(state, :pool_pid)
+
+    if pool_pid != nil and Process.alive?(pool_pid) do
       try do
-        Supervisor.stop(state.pool_pid, :shutdown)
+        Supervisor.stop(pool_pid, :shutdown)
       rescue
         e -> Logger.warning("Pool stop at terminate failed: #{inspect(e)}")
       end
@@ -384,34 +403,46 @@ defmodule Bee.Repo do
   defp resolve_id(id, prefix), do: Bee.Id.to_prefixed(id, prefix)
 
   defp read_pool_name(opts) do
-    base = Keyword.get(opts, :name, Bee.Repo)
-    :"#{base}.ReadPool"
+    case Keyword.get(opts, :pool_name) do
+      nil ->
+        base = Keyword.get(opts, :name, Bee.Repo)
+        :"#{base}.ReadPool"
+
+      name ->
+        name
+    end
   end
 
   defp read_with_pool(state, lane, fun) do
-    case state do
-      %{pool_pid: pid, pool_name: pool_name} when is_pid(pid) ->
-        actual_pool =
-          case lane do
-            :fast -> Bee.Read.Pool.fast_pool_name(pool_name)
-            :compute -> Bee.Read.Pool.compute_pool_name(pool_name)
+    pool_name = Map.get(state, :pool_name)
+    pool_pid = Map.get(state, :pool_pid)
+
+    actual_pool =
+      case lane do
+        :fast -> Bee.Read.Pool.fast_pool_name(pool_name)
+        :compute -> Bee.Read.Pool.compute_pool_name(pool_name)
+      end
+
+    # Use the pool if it's running (either linked pid or external supervisor child)
+    pool_alive? =
+      (pool_pid != nil and Process.alive?(pool_pid)) or
+        (is_atom(actual_pool) and GenServer.whereis(actual_pool) != nil)
+
+    if pool_alive? do
+      NimblePool.checkout!(
+        actual_pool,
+        nil,
+        fn _from, conn ->
+          try do
+            {fun.(conn), conn}
+          rescue
+            e -> {{:error, {:read_failed, e}}, conn}
           end
-
-        NimblePool.checkout!(
-          actual_pool,
-          nil,
-          fn _from, conn ->
-            try do
-              {fun.(conn), conn}
-            rescue
-              e -> {{:error, {:read_failed, e}}, conn}
-            end
-          end,
-          :infinity
-        )
-
-      _ ->
-        fun.(state.conn)
+        end,
+        :infinity
+      )
+    else
+      fun.(state.conn)
     end
   end
   defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
