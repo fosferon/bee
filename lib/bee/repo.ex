@@ -243,20 +243,22 @@ defmodule Bee.Repo do
   end
 
   def handle_call({:block, id, blocker_id}, _from, state) do
-    full_id = resolve_id(id, state.prefix)
-    full_blocker = resolve_id(blocker_id, state.prefix)
+    block_dependency(id, blocker_id, :blocks, state)
+  end
 
-    case Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker) do
-      :ok ->
-        :ok = Bee.Store.insert_dependency(state.conn, full_id, full_blocker)
-        :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
-        state = schedule_export(state)
-        {:reply, :ok, state}
-
-      {:error, :cycle} ->
-        {:reply, {:error, :cycle}, state}
+  def handle_call({:block, id, blocker_id, opts}, _from, state) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :type) do
+        {:ok, type} -> block_dependency(id, blocker_id, type, state)
+        :error -> block_dependency(id, blocker_id, :blocks, state)
+      end
+    else
+      {:reply, {:error, :unknown_dep_type}, state}
     end
   end
+
+  def handle_call({:block, _id, _blocker_id, _opts}, _from, state),
+    do: {:reply, {:error, :unknown_dep_type}, state}
 
   def handle_call({:unblock, id, blocker_id}, _from, state) do
     full_id = resolve_id(id, state.prefix)
@@ -420,6 +422,24 @@ defmodule Bee.Repo do
   end
 
   # --- Helpers ---
+
+  defp block_dependency(id, blocker_id, type, state) do
+    full_id = resolve_id(id, state.prefix)
+    full_blocker = resolve_id(blocker_id, state.prefix)
+
+    with :ok <- Bee.Dependency.Type.validate(type),
+         :ok <- Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker),
+         :ok <- Bee.Store.insert_dependency(state.conn, full_id, full_blocker, type) do
+      if type in Bee.Dependency.Type.gating() do
+        :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
+      end
+
+      state = schedule_export(state)
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   defp schedule_export(%{jsonl_path: nil} = state), do: state
   defp schedule_export(%{export_mode: :disabled} = state), do: state

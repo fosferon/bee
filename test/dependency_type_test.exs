@@ -13,4 +13,9 @@ defmodule Bee.Dependency.TypeTest do
     assert {:error, :unwritable_dep_type} = Type.validate(:parent_child)
     assert {:error, :unknown_dep_type} = Type.validate(:invented)
   end
+
+  test "storage names preserve the wire vocabulary" do
+    assert Type.storage_name(:conditional_blocks) == "conditional-blocks"
+    assert Type.storage_name(:waits_for) == "waits-for"
+  end
 end

@@ -70,8 +70,12 @@ defmodule Bee do
   def comment(id, text, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:comment, id, text, opts})
 
-  def block(id, blocker_id, server \\ @default_server),
-    do: GenServer.call(server, {:block, id, blocker_id})
+  def block(id, blocker_id, server \\ @default_server)
+  def block(id, blocker_id, opts) when is_list(opts), do: block(id, blocker_id, opts, @default_server)
+  def block(id, blocker_id, server), do: GenServer.call(server, {:block, id, blocker_id})
+
+  def block(id, blocker_id, opts, server) when is_list(opts),
+    do: GenServer.call(server, {:block, id, blocker_id, opts})
 
   def unblock(id, blocker_id, server \\ @default_server),
     do: GenServer.call(server, {:unblock, id, blocker_id})
