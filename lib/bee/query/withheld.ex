@@ -3,7 +3,7 @@ defmodule Bee.Query.Withheld do
 
   alias Bee.Query.Spec
 
-  @relations [:comments]
+  @relations [:comments, :labels]
 
   @spec build(Exqlite.Sqlite3.db(), Spec.t(), [map()]) :: {map(), keyword()}
   def build(conn, %Spec{} = spec, issues) do
@@ -26,7 +26,9 @@ defmodule Bee.Query.Withheld do
   defp limit_truncation(_conn, %Spec{limit: nil}, _issues), do: {%{}, []}
 
   defp limit_truncation(conn, spec, issues) do
-    {:ok, total} = Bee.Store.count_issues(conn, spec |> Spec.to_opts() |> Keyword.drop([:limit, :offset]))
+    {:ok, total} =
+      Bee.Store.count_issues(conn, spec |> Spec.to_opts() |> Keyword.drop([:limit, :offset]))
+
     offset = spec.offset || 0
     omitted = max(total - offset - length(issues), 0)
 

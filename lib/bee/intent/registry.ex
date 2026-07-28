@@ -37,7 +37,7 @@ defmodule Bee.Intent.Registry do
       "order_by" => Enum.map(spec.order_by, fn {field, direction} -> [field, direction] end),
       "limit" => spec.limit,
       "offset" => spec.offset,
-      "include" => spec.include,
+      "include" => Enum.map(spec.include, &Atom.to_string/1),
       "detail" => spec.detail,
       "transforms" => encode_transforms(spec.transforms)
     }
