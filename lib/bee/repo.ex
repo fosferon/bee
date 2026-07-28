@@ -542,6 +542,12 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call({:rollup, id, opts}, _from, state) do
+    full = resolve_id(id, state.prefix)
+    result = read_with_pool(state, :compute, &Bee.Graph.Rollup.compute(&1, full, opts))
+    {:reply, result, state}
+  end
+
   def handle_call(:bottlenecks, _from, state) do
     result = read_with_pool(state, :compute, &Bee.Graph.Allocation.bottlenecks/1)
     {:reply, result, state}

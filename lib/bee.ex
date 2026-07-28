@@ -113,6 +113,9 @@ defmodule Bee do
 
   def critical_path(server \\ @default_server), do: GenServer.call(server, :critical_path)
 
+  def rollup(id, opts \\ [], server \\ @default_server) when is_list(opts),
+    do: GenServer.call(server, {:rollup, id, opts})
+
   def lock(id, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:lock, id, opts})
 
