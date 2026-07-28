@@ -213,7 +213,11 @@ defmodule Bee.Store.EventsTest do
     assert {:ok, _} = Bee.create("subject", [], server)
 
     assert :ok =
-             Bee.measure(1, %{measure: "effort", value: 30, dims: %{"agent" => "bee"}}, server)
+             Bee.measure(
+               1,
+               %{measure: "effort", value: 30, dims: %{"agent" => "bee", "kind" => "actual"}},
+               server
+             )
 
     conn = GenServer.call(server, :conn)
 
@@ -255,10 +259,15 @@ defmodule Bee.Store.EventsTest do
 
   test "measure rejects unknown measures and invalid dimensions without events", %{server: server} do
     assert {:ok, _} = Bee.create("subject", [], server)
-    assert {:error, :unknown_measure} = Bee.measure(1, %{measure: "cost", value: 1}, server)
+
+    assert {:error, :unknown_measure} =
+             Bee.measure(1, %{measure: "cost", value: 1, dims: %{"kind" => "actual"}}, server)
 
     assert {:error, :invalid_dimension_key} =
              Bee.measure(1, %{measure: "effort", value: 1, dims: %{"Agent" => "bee"}}, server)
+
+    assert {:error, :invalid_measurement_kind} =
+             Bee.measure(1, %{measure: "effort", value: 1}, server)
 
     conn = GenServer.call(server, :conn)
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")

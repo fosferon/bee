@@ -32,15 +32,18 @@ defmodule Bee.Store.Measurements do
              dims: map(),
              source: String.t() | nil
            }}
-          | {:error, :unknown_measure | :invalid_measure | :invalid_dimension_key}
+          | {:error,
+             :unknown_measure
+             | :invalid_measure
+             | :invalid_dimension_key
+             | :invalid_measurement_kind}
   def prepare(conn, attrs) when is_map(attrs) do
     with measure when is_binary(measure) and measure != "" <- fetch(attrs, :measure),
          value when is_number(value) <- fetch(attrs, :value),
          unit when is_binary(unit) <- registered_unit(conn, measure),
          dims when is_map(dims) <- fetch(attrs, :dims, %{}),
-         :ok <- validate_dims(dims) do
-      dims = Map.put_new(dims, "kind", "actual")
-
+         :ok <- validate_dims(dims),
+         :ok <- validate_kind(dims) do
       {:ok,
        %{
          measure: measure,
@@ -96,6 +99,9 @@ defmodule Bee.Store.Measurements do
       {:error, :invalid_dimension_key}
     end
   end
+
+  defp validate_kind(%{"kind" => kind}) when kind in ["estimate", "actual"], do: :ok
+  defp validate_kind(_dims), do: {:error, :invalid_measurement_kind}
 
   defp encode_dims(dims) do
     dims
