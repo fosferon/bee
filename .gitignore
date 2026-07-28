@@ -24,3 +24,10 @@ bee-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+.elixir_context/
+
+# Local agent tooling and generated workspace assets stay outside source control.
+/.*
+/*
+!/_bmad-output/
+!/_bmad-output/**
