@@ -367,29 +367,58 @@ defmodule Bee.Repo do
   def handle_call({:lock, id, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
 
-    # Ensure the locking agent exists in agents table (FK integrity)
-    if locked_by = Keyword.get(opts, :locked_by) do
-      Bee.Agents.insert_agent(state.conn, locked_by)
-      Bee.World.add_agent(state.alloc_graph, locked_by)
+    result =
+      transaction(state.conn, fn ->
+        if locked_by = Keyword.get(opts, :locked_by) do
+          Bee.Agents.insert_agent(state.conn, locked_by)
+        end
+
+        with {:ok, lock} <- Bee.Lock.acquire(state.conn, full, opts),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full, "lock.acquired",
+                 actor: lock.locked_by,
+                 fields: Map.take(lock, [:locked_by, :locked_at, :expires_at])
+               ) do
+          {:ok, lock}
+        end
+      end)
+
+    case result do
+      {:ok, lock} ->
+        if lock.locked_by, do: Bee.World.add_agent(state.alloc_graph, lock.locked_by)
+        {:reply, {:ok, lock}, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
     end
-
-    {result, state} =
-      case Bee.Lock.acquire(state.conn, full, opts) do
-        {:ok, _} = ok ->
-          {ok, schedule_export(state)}
-
-        {:error, reason} ->
-          {{:error, classify_write_error(reason)}, state}
-      end
-
-    {:reply, result, state}
   end
 
   def handle_call({:unlock, id}, _from, state) do
     full = resolve_id(id, state.prefix)
-    Bee.Lock.release(state.conn, full)
-    state = schedule_export(state)
-    {:reply, :ok, state}
+
+    result =
+      transaction(state.conn, fn ->
+        case Bee.Lock.get(state.conn, full) do
+          nil ->
+            {:ok, :unchanged}
+
+          lock ->
+            with :ok <- Bee.Lock.release(state.conn, full),
+                 {:ok, _seq} <-
+                   Bee.Store.Events.record(state.conn, full, "lock.released",
+                     actor: Map.get(lock, "locked_by"),
+                     fields: %{}
+                   ) do
+              {:ok, :unlocked}
+            end
+        end
+      end)
+
+    case result do
+      {:ok, :unlocked} -> {:reply, :ok, schedule_export(state)}
+      {:ok, :unchanged} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+    end
   end
 
   def handle_call({:register_project, id, attrs}, _from, state) do

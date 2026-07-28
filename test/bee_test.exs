@@ -1020,7 +1020,7 @@ defmodule BeeTest do
       :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
       {:row, [event_count]} = Exqlite.Sqlite3.step(conn, stmt)
       Exqlite.Sqlite3.release(conn, stmt)
-      assert event_count == 2
+      assert event_count == 3
 
       # Re-dispatch should be a no-op (no double-count, cascade F3)
       swept_again = GenServer.call(pid, :sweep_expired_locks)
@@ -1033,7 +1033,7 @@ defmodule BeeTest do
       :ok = Exqlite.Sqlite3.bind(stmt2, ["test-1"])
       {:row, [event_count2]} = Exqlite.Sqlite3.step(conn, stmt2)
       Exqlite.Sqlite3.release(conn, stmt2)
-      assert event_count2 == 2
+      assert event_count2 == 3
 
       GenServer.stop(pid)
       File.rm(db_path)

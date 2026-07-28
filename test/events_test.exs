@@ -146,6 +146,27 @@ defmodule Bee.Store.EventsTest do
     :ok = Exqlite.Sqlite3.release(conn, stmt)
   end
 
+  test "lock and unlock emit events only for state changes", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [], server)
+    assert {:ok, _} = Bee.lock(1, [locked_by: "agent"], server)
+    assert :ok = Bee.unlock(1, server)
+    assert :ok = Bee.unlock(1, server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type FROM events WHERE issue_id = ? ORDER BY seq"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, ["issue.created"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["lock.acquired"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["lock.released"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert :done = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
