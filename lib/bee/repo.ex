@@ -276,6 +276,12 @@ defmodule Bee.Repo do
   def handle_call({:traverse, _id, _opts}, _from, state),
     do: {:reply, {:error, :invalid_spec}, state}
 
+  def handle_call({:candidates, id}, _from, state) do
+    full_id = resolve_id(id, state.prefix)
+    result = read_with_pool(state, :compute, fn conn -> Bee.Query.Candidates.for_issue(conn, full_id) end)
+    {:reply, result, state}
+  end
+
   def handle_call({:unblock, id, blocker_id}, _from, state) do
     full_id = resolve_id(id, state.prefix)
     full_blocker = resolve_id(blocker_id, state.prefix)

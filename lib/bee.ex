@@ -83,6 +83,9 @@ defmodule Bee do
   def traverse(id, opts \\ [], server \\ @default_server) when is_list(opts),
     do: GenServer.call(server, {:traverse, id, opts})
 
+  def candidates(id, server \\ @default_server),
+    do: GenServer.call(server, {:candidates, id})
+
   def lock(id, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:lock, id, opts})
 

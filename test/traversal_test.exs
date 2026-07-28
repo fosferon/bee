@@ -44,4 +44,13 @@ defmodule Bee.TraversalTest do
     {:ok, ready} = Bee.ready([], server)
     assert Enum.map(ready, & &1.id) |> Enum.sort() == [1, 2]
   end
+
+  test "candidate edges are advisory and reasoned", %{server: server} do
+    {:ok, _} = Bee.register_project("bee", %{}, server)
+    {:ok, _} = Bee.create("Source", [project_id: "bee", labels: ["query"]], server)
+    {:ok, _} = Bee.create("Related", [project_id: "bee"], server)
+
+    assert {:ok, [%{issue_id: 2, reason: "same_project", confidence: 0.8}]} =
+             Bee.candidates(1, server)
+  end
 end
