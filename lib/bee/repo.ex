@@ -256,12 +256,29 @@ defmodule Bee.Repo do
   def handle_call({:update, id, attrs}, _from, state) do
     full = resolve_id(id, state.prefix)
 
-    with {:ok, normalized_attrs} <- normalize_update_attrs(attrs, full, state),
-         :ok <- Bee.Store.update_issue(state.conn, full, normalized_attrs) do
-      state = schedule_export(state)
-      {:reply, :ok, state}
-    else
-      {:error, _reason} = error -> {:reply, error, state}
+    case normalize_update_attrs(attrs, full, state) do
+      {:ok, normalized_attrs} when map_size(normalized_attrs) == 0 ->
+        {:reply, :ok, state}
+
+      {:ok, normalized_attrs} ->
+        result =
+          transaction(state.conn, fn ->
+            with :ok <- Bee.Store.update_issue(state.conn, full, normalized_attrs),
+                 {:ok, _seq} <-
+                   Bee.Store.Events.record(state.conn, full, "issue.updated",
+                     fields: Map.drop(normalized_attrs, [:labels])
+                   ) do
+              {:ok, :updated}
+            end
+          end)
+
+        case result do
+          {:ok, :updated} -> {:reply, :ok, schedule_export(state)}
+          {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+        end
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
     end
   end
 
