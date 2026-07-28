@@ -300,13 +300,25 @@ defmodule Bee.Repo do
         {:reply, :ok, state}
 
       {:ok, normalized_attrs} ->
+        {measure_attrs, issue_attrs} = Map.pop(normalized_attrs, :measure)
+
         result =
           transaction(state.conn, fn ->
-            with :ok <- Bee.Store.update_issue(state.conn, full, normalized_attrs),
-                 {:ok, _seq} <-
+            with {:ok, measurement} <- prepare_measurement(state.conn, measure_attrs),
+                 :ok <- Bee.Store.update_issue(state.conn, full, issue_attrs),
+                 {:ok, seq} <-
                    Bee.Store.Events.record(state.conn, full, "issue.updated",
-                     fields: Map.drop(normalized_attrs, [:labels])
-                   ) do
+                     fields: fn seq ->
+                       fields = Map.drop(issue_attrs, [:labels])
+
+                       if measurement do
+                         Map.put(fields, :measure, Map.put(measurement, :seq, seq))
+                       else
+                         fields
+                       end
+                     end
+                   ),
+                 :ok <- record_measurement(state.conn, full, seq, measurement) do
               {:ok, :updated}
             end
           end)
@@ -843,6 +855,14 @@ defmodule Bee.Repo do
   end
 
   defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
+
+  defp prepare_measurement(_conn, nil), do: {:ok, nil}
+  defp prepare_measurement(conn, attrs), do: Bee.Store.Measurements.prepare(conn, attrs)
+
+  defp record_measurement(_conn, _issue_id, _seq, nil), do: :ok
+
+  defp record_measurement(conn, issue_id, seq, measurement),
+    do: Bee.Store.Measurements.record(conn, issue_id, seq, measurement)
 
   defp normalize_update_attrs(attrs, issue_id, state) do
     attrs = Map.new(attrs)

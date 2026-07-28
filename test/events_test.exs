@@ -267,6 +267,52 @@ defmodule Bee.Store.EventsTest do
     :ok = Exqlite.Sqlite3.release(conn, stmt)
   end
 
+  test "update records its measurement in the same issue.updated event", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [], server)
+
+    assert :ok =
+             Bee.update(
+               1,
+               %{
+                 status: "closed",
+                 measure: %{measure: "effort", value: 45, dims: %{"kind" => "estimate"}}
+               },
+               server
+             )
+
+    conn = GenServer.call(server, :conn)
+
+    {:ok, event_stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, payload FROM events WHERE issue_id = ? AND seq = 2"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(event_stmt, ["test-1"])
+    assert {:row, ["issue.updated", payload]} = Exqlite.Sqlite3.step(conn, event_stmt)
+    :ok = Exqlite.Sqlite3.release(conn, event_stmt)
+
+    assert %{
+             "fields" => %{
+               "measure" => %{"dims" => %{"kind" => "estimate"}, "seq" => 2},
+               "status" => "closed"
+             }
+           } = Jason.decode!(payload)
+
+    {:ok, measurement_stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT seq, value, dims FROM measurements WHERE issue_id = ?"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(measurement_stmt, ["test-1"])
+
+    assert {:row, [2, 45.0, ~s({"kind":"estimate"})]} =
+             Exqlite.Sqlite3.step(conn, measurement_stmt)
+
+    :ok = Exqlite.Sqlite3.release(conn, measurement_stmt)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
