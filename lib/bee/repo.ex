@@ -204,17 +204,22 @@ defmodule Bee.Repo do
   end
 
   def handle_call({:ready, _opts}, _from, state) do
-    ready_ids = Bee.Graph.ready_issues(state.dep_graph, state.conn)
+    result =
+      read_with_pool(state, :fast, fn conn ->
+        issues =
+          conn
+          |> Bee.Graph.Ready.issue_ids()
+          |> Enum.flat_map(fn id ->
+            case Bee.Store.get_issue(conn, id) do
+              {:ok, issue} -> [issue]
+              _ -> []
+            end
+          end)
 
-    issues =
-      Enum.flat_map(ready_ids, fn id ->
-        case Bee.Store.get_issue(state.conn, id) do
-          {:ok, issue} -> [issue]
-          _ -> []
-        end
+        {:ok, issues}
       end)
 
-    {:reply, {:ok, issues}, state}
+    {:reply, result, state}
   end
 
   def handle_call({:update, id, attrs}, _from, state) do
