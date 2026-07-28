@@ -94,7 +94,8 @@ defmodule Bee.Store.Migrate do
       migration_001(),
       migration_002(),
       migration_003(),
-      migration_004()
+      migration_004(),
+      migration_005()
     ]
 
   @spec migration_000() :: migration()
@@ -111,6 +112,9 @@ defmodule Bee.Store.Migrate do
 
   @spec migration_004() :: migration()
   def migration_004, do: {5, :rebuild_dependencies_pk, &rebuild_dependencies_pk/1}
+
+  @spec migration_005() :: migration()
+  def migration_005, do: {6, :add_event_envelope, &add_event_envelope/1}
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
           {:ok, :fresh | :devman | :gc_daemon} | {:error, :unknown_baseline}
@@ -474,6 +478,27 @@ defmodule Bee.Store.Migrate do
       :ok -> :ok
       :error -> {:error, :dependencies_pk_rebuild_failed}
       {:error, _reason} -> {:error, :dependencies_pk_rebuild_failed}
+    end
+  end
+
+  # --- Migration 005: event type and canonical JSON payload (AD-7, AD-8) ---
+
+  defp add_event_envelope(conn) do
+    statements = [
+      "ALTER TABLE events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'legacy.unknown'",
+      "ALTER TABLE events ADD COLUMN payload TEXT NOT NULL DEFAULT '{\"fields\":{},\"refs\":{},\"rejected\":{}}'",
+      "CREATE INDEX idx_events_issue_seq ON events (issue_id, seq)"
+    ]
+
+    case Enum.reduce_while(statements, :ok, fn sql, :ok ->
+           case execute(conn, sql) do
+             :ok -> {:cont, :ok}
+             {:error, _reason} -> {:halt, :error}
+           end
+         end) do
+      :ok -> :ok
+      :error -> {:error, :event_envelope_failed}
+      {:error, _reason} -> {:error, :event_envelope_failed}
     end
   end
 

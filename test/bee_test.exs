@@ -51,13 +51,15 @@ defmodule BeeTest do
       Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
     {:ok, conn} = Exqlite.Sqlite3.open(db_path)
-    assert {:ok, 5} = Bee.Store.Migrate.user_version(conn)
+    assert {:ok, 6} = Bee.Store.Migrate.user_version(conn)
     assert sqlite_table_exists?(conn, "issues_fts")
     refute sqlite_table_exists?(conn, "labels")
     # Migration 002: issues.metadata
     assert sqlite_column_exists?(conn, "issues", "metadata")
     # Migration 003: events, measurements, intents, measures, intent_usage
     assert sqlite_table_exists?(conn, "events")
+    assert sqlite_column_exists?(conn, "events", "event_type")
+    assert sqlite_column_exists?(conn, "events", "payload")
     assert sqlite_table_exists?(conn, "measurements")
     assert sqlite_table_exists?(conn, "intents")
     assert sqlite_table_exists?(conn, "measures")
@@ -746,7 +748,9 @@ defmodule BeeTest do
       db_path = Path.join(System.tmp_dir!(), "bee_pool_#{System.unique_integer([:positive])}.db")
 
       name = :"bee_pool_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
       # Create an issue so we have data to read
       {:ok, _} = Bee.create("Pool test", [], pid)
@@ -767,7 +771,9 @@ defmodule BeeTest do
       db_path = Path.join(System.tmp_dir!(), "bee_pool_#{System.unique_integer([:positive])}.db")
 
       name = :"bee_pool_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
       # A read for a non-existent issue returns error but doesn't crash
       result = GenServer.call(pid, {:get, 99999})
@@ -874,7 +880,9 @@ defmodule BeeTest do
       jsonl = Path.join(System.tmp_dir!(), "bee_deb_#{System.unique_integer([:positive])}.jsonl")
 
       name = :"bee_deb_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
 
       # Multiple writes in rapid succession
       Bee.create("Issue 1", [], pid)
@@ -902,7 +910,9 @@ defmodule BeeTest do
       jsonl = Path.join(System.tmp_dir!(), "bee_idem_#{System.unique_integer([:positive])}.jsonl")
 
       name = :"bee_idem_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
 
       # Create test data
       Bee.create("Idempotent test", [description: "test desc", labels: ["bug"]], pid)
@@ -913,9 +923,13 @@ defmodule BeeTest do
       assert File.exists?(jsonl)
 
       # Import the JSONL into a fresh DB
-      db_path2 = Path.join(System.tmp_dir!(), "bee_idem2_#{System.unique_integer([:positive])}.db")
+      db_path2 =
+        Path.join(System.tmp_dir!(), "bee_idem2_#{System.unique_integer([:positive])}.db")
+
       name2 = :"bee_idem2_#{System.unique_integer([:positive])}"
-      {:ok, pid2} = Bee.Repo.start_link(db_path: db_path2, prefix: "test", jsonl_path: nil, name: name2)
+
+      {:ok, pid2} =
+        Bee.Repo.start_link(db_path: db_path2, prefix: "test", jsonl_path: nil, name: name2)
 
       {:ok, 1} = GenServer.call(pid2, {:import_jsonl, jsonl})
       {:ok, issue} = GenServer.call(pid2, {:get, 1})
@@ -943,7 +957,9 @@ defmodule BeeTest do
       jsonl = Path.join(System.tmp_dir!(), "bee_atom_#{System.unique_integer([:positive])}.jsonl")
 
       name = :"bee_atom_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: jsonl, name: name)
 
       Bee.create("Atomic test", [], pid)
 
@@ -969,7 +985,9 @@ defmodule BeeTest do
       db_path = Path.join(System.tmp_dir!(), "bee_sweep_#{System.unique_integer([:positive])}.db")
 
       name = :"bee_sweep_#{System.unique_integer([:positive])}"
-      {:ok, pid} = Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
+
+      {:ok, pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
       # Create an issue and lock it with a very short TTL
       {:ok, _} = Bee.create("Sweep test", [], pid)
@@ -987,7 +1005,9 @@ defmodule BeeTest do
       assert Bee.Lock.get(conn, "test-1") == nil
 
       # Verify an event was emitted
-      {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+      {:ok, stmt} =
+        Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+
       :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
       {:row, [event_count]} = Exqlite.Sqlite3.step(conn, stmt)
       Exqlite.Sqlite3.release(conn, stmt)
@@ -998,7 +1018,9 @@ defmodule BeeTest do
       assert swept_again == 0
 
       # Event count should still be 1
-      {:ok, stmt2} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+      {:ok, stmt2} =
+        Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+
       :ok = Exqlite.Sqlite3.bind(stmt2, ["test-1"])
       {:row, [event_count2]} = Exqlite.Sqlite3.step(conn, stmt2)
       Exqlite.Sqlite3.release(conn, stmt2)
