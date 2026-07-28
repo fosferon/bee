@@ -124,6 +124,28 @@ defmodule Bee.Store.EventsTest do
              Jason.decode!(payload)
   end
 
+  test "unblock emits only when it removes a dependency", %{server: server} do
+    assert {:ok, _} = Bee.create("blocker", [], server)
+    assert {:ok, _} = Bee.create("dependent", [], server)
+    assert :ok = Bee.block(2, 1, server)
+    assert :ok = Bee.unblock(2, 1, server)
+    assert :ok = Bee.unblock(2, 1, server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type FROM events WHERE issue_id = ? ORDER BY seq"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-2"])
+    assert {:row, ["issue.created"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["dep.added"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["dep.removed"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert :done = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)

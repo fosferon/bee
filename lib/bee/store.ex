@@ -617,6 +617,38 @@ defmodule Bee.Store do
     end
   end
 
+  @spec dependency_exists?(Exqlite.Sqlite3.db(), String.t(), String.t(), atom()) :: boolean()
+  def dependency_exists?(conn, issue_id, depends_on_id, type) do
+    case Bee.Dependency.Type.validate(type) do
+      :ok ->
+        {:ok, stmt} =
+          Exqlite.Sqlite3.prepare(
+            conn,
+            """
+            SELECT 1 FROM dependencies
+            WHERE issue_id = ? AND depends_on_id = ? AND dep_type = ?
+            LIMIT 1
+            """
+          )
+
+        :ok =
+          Exqlite.Sqlite3.bind(stmt, [
+            issue_id,
+            depends_on_id,
+            Bee.Dependency.Type.storage_name(type)
+          ])
+
+        try do
+          match?({:row, _}, Exqlite.Sqlite3.step(conn, stmt))
+        after
+          Exqlite.Sqlite3.release(conn, stmt)
+        end
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
   @spec has_gating_dependency?(Exqlite.Sqlite3.db(), String.t(), String.t()) :: boolean()
   def has_gating_dependency?(conn, issue_id, depends_on_id) do
     types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)

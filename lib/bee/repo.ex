@@ -583,16 +583,38 @@ defmodule Bee.Repo do
     full_id = resolve_id(id, state.prefix)
     full_blocker = resolve_id(blocker_id, state.prefix)
 
-    with :ok <- Bee.Dependency.Type.validate(type),
-         :ok <- Bee.Store.remove_dependency(state.conn, full_id, full_blocker, type) do
-      unless Bee.Store.has_gating_dependency?(state.conn, full_id, full_blocker) do
-        :ok = Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
-      end
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Dependency.Type.validate(type),
+             true <- Bee.Store.dependency_exists?(state.conn, full_id, full_blocker, type),
+             :ok <- Bee.Store.remove_dependency(state.conn, full_id, full_blocker, type),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full_id, "dep.removed",
+                 fields: %{
+                   depends_on_id: full_blocker,
+                   dep_type: Bee.Dependency.Type.storage_name(type)
+                 }
+               ) do
+          {:ok, :unblocked}
+        else
+          false -> {:ok, :unchanged}
+          {:error, _reason} = error -> error
+        end
+      end)
 
-      state = schedule_export(state)
-      {:reply, :ok, state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case result do
+      {:ok, :unblocked} ->
+        unless Bee.Store.has_gating_dependency?(state.conn, full_id, full_blocker) do
+          :ok = Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
+        end
+
+        {:reply, :ok, schedule_export(state)}
+
+      {:ok, :unchanged} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
