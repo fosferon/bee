@@ -856,23 +856,32 @@ defmodule BeeTest do
         5_000 -> flunk("Repo didn't die")
       end
 
-      # Give supervisor time to restart children
-      Process.sleep(500)
+      assert_eventually(fn ->
+        repo = GenServer.whereis(repo_name)
+        pool = GenServer.whereis(pool_name)
+        sweeper = GenServer.whereis(sweeper_name)
 
-      # Repo should be back
-      assert GenServer.whereis(repo_name) != nil
-
-      # Pool and Sweeper should have been restarted (new PIDs)
-      assert GenServer.whereis(pool_name) != nil
-      assert GenServer.whereis(pool_name) != initial_pool
-
-      assert GenServer.whereis(sweeper_name) != nil
-      assert GenServer.whereis(sweeper_name) != initial_sweeper
+        repo != nil and pool != nil and sweeper != nil and
+          pool != initial_pool and sweeper != initial_sweeper
+      end)
 
       Supervisor.stop(sup)
       File.rm(db_path)
     end
   end
+
+  defp assert_eventually(predicate, attempts \\ 20)
+
+  defp assert_eventually(predicate, attempts) when attempts > 0 do
+    if predicate.() do
+      assert true
+    else
+      Process.sleep(250)
+      assert_eventually(predicate, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_predicate, 0), do: flunk("supervision tree did not restart in time")
 
   describe "AD-17: debounced JSONL export (Story 3.4)" do
     test "export is debounced — not once per write" do

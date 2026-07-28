@@ -72,4 +72,32 @@ defmodule Bee.Store.EventsTest do
 
     assert bytes > 2_000
   end
+
+  test "keeps truncation previews valid UTF-8", %{server: server} do
+    {:ok, _} = Bee.create("subject", [], server)
+    conn = GenServer.call(server, :conn)
+    body = String.duplicate("😀", 600)
+
+    assert {:ok, 1} =
+             Bee.Store.Events.record(conn, "test-1", "issue.updated", fields: %{body: body})
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT payload FROM events WHERE issue_id = ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, [payload]} = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+
+    assert %{"fields" => %{"body" => %{"preview" => preview}}} = Jason.decode!(payload)
+    assert String.valid?(preview)
+    assert byte_size(preview) <= 2_048
+  end
+
+  test "sequences events per issue", %{server: server} do
+    {:ok, _} = Bee.create("first", [], server)
+    {:ok, _} = Bee.create("second", [], server)
+    conn = GenServer.call(server, :conn)
+
+    assert {:ok, 1} = Bee.Store.Events.record(conn, "test-1", "issue.updated")
+    assert {:ok, 2} = Bee.Store.Events.record(conn, "test-1", "issue.updated")
+    assert {:ok, 1} = Bee.Store.Events.record(conn, "test-2", "issue.updated")
+  end
 end

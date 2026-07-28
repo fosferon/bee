@@ -84,10 +84,26 @@ defmodule Bee.Store.Events do
         "_truncated" => true,
         "sha256" => :crypto.hash(:sha256, encoded) |> Base.encode16(case: :lower),
         "bytes" => byte_size(encoded),
-        "preview" => binary_part(encoded, 0, @max_value_bytes)
+        "preview" => valid_utf8_prefix(encoded, @max_value_bytes)
       }
     else
       value
+    end
+  end
+
+  defp valid_utf8_prefix(value, max_bytes) do
+    value
+    |> binary_part(0, min(byte_size(value), max_bytes))
+    |> trim_invalid_suffix()
+  end
+
+  defp trim_invalid_suffix(value) do
+    if byte_size(value) == 0 or String.valid?(value) do
+      value
+    else
+      value
+      |> binary_part(0, byte_size(value) - 1)
+      |> trim_invalid_suffix()
     end
   end
 
