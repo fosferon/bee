@@ -167,6 +167,27 @@ defmodule Bee.Store.EventsTest do
     :ok = Exqlite.Sqlite3.release(conn, stmt)
   end
 
+  test "assign emits only when it changes the assignee", %{server: server} do
+    assert {:ok, _} = Bee.register_agent("agent", %{}, server)
+    assert {:ok, _} = Bee.create("subject", [], server)
+    assert :ok = Bee.assign(1, "agent", server)
+    assert :ok = Bee.assign(1, "agent", server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, payload FROM events WHERE issue_id = ? ORDER BY seq"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, ["issue.created", _]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["issue.updated", payload]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert :done = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+    assert %{"fields" => %{"assigned_to" => "agent"}} = Jason.decode!(payload)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)

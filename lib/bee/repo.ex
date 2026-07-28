@@ -435,10 +435,35 @@ defmodule Bee.Repo do
 
   def handle_call({:assign, issue_id, agent_id}, _from, state) do
     full = resolve_id(issue_id, state.prefix)
-    Bee.Agents.assign_issue(state.conn, full, agent_id)
-    Bee.World.assign(state.alloc_graph, full, agent_id)
-    state = schedule_export(state)
-    {:reply, :ok, state}
+
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, issue} <- Bee.Store.get_issue(state.conn, full) do
+          if issue.assigned_to == agent_id do
+            {:ok, :unchanged}
+          else
+            with :ok <- Bee.Agents.assign_issue(state.conn, full, agent_id),
+                 {:ok, _seq} <-
+                   Bee.Store.Events.record(state.conn, full, "issue.updated",
+                     fields: %{assigned_to: agent_id}
+                   ) do
+              {:ok, :assigned}
+            end
+          end
+        end
+      end)
+
+    case result do
+      {:ok, :assigned} ->
+        Bee.World.assign(state.alloc_graph, full, agent_id)
+        {:reply, :ok, schedule_export(state)}
+
+      {:ok, :unchanged} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
   end
 
   def handle_call({:join_project, agent_id, project_id}, _from, state) do
