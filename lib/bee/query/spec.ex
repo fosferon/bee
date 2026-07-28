@@ -3,7 +3,7 @@ defmodule Bee.Query.Spec do
 
   @order_columns ~w(created_at updated_at priority id)a
   @order_directions [:asc, :desc]
-  @include_relations [:comments]
+  @include_relations [:comments, :labels]
   @details [:minimal, :compact, :standard, :full]
   @fields [
     :status,
@@ -38,7 +38,7 @@ defmodule Bee.Query.Spec do
           order_by: keyword(:asc | :desc),
           limit: pos_integer() | nil,
           offset: non_neg_integer() | nil,
-          include: [:comments],
+          include: [:comments | :labels],
           detail: :minimal | :compact | :standard | :full,
           transforms: %{optional(atom()) => {:local, :trim} | {:external, atom()}}
         }

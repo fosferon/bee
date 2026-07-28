@@ -62,8 +62,14 @@ defmodule Bee.Query.Projection do
 
   defp relations(issue, spec) do
     Map.new(@relations, fn
-      :comments -> {:comments, if(:comments in spec.include, do: issue.comments, else: :not_loaded)}
-      relation -> {relation, :not_loaded}
+      :comments ->
+        {:comments, if(:comments in spec.include, do: issue.comments, else: :not_loaded)}
+
+      :labels ->
+        {:labels, if(:labels in spec.include, do: issue.labels, else: :not_loaded)}
+
+      relation ->
+        {relation, :not_loaded}
     end)
   end
 end

@@ -102,7 +102,10 @@ defmodule Bee.QuerySpecTest do
 
     Process.sleep(25)
     conn = GenServer.call(server, :conn)
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT count FROM intent_usage WHERE name = ? AND kind = ?")
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT count FROM intent_usage WHERE name = ? AND kind = ?")
+
     :ok = Exqlite.Sqlite3.bind(stmt, ["what_next", "core"])
     assert {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
@@ -119,5 +122,22 @@ defmodule Bee.QuerySpecTest do
 
     assert {:ok, %{issues: [%{title: "  padded  "}], withheld: %{}}} =
              Bee.query([transforms: %{title: {:external, :strip}}], server)
+  end
+
+  test "registered intents preserve transforms and can include labels", %{server: server} do
+    {:ok, _} = Bee.create("  padded  ", [labels: ["query"]], server)
+    assert :ok = Bee.Query.Transform.register(:strip, &String.trim/1)
+
+    assert :ok =
+             Bee.register_intent(
+               "trimmed_labeled",
+               [include: [:labels], transforms: %{title: {:external, :strip}}],
+               server
+             )
+
+    assert {:ok, %{issues: [%{title: "padded", labels: ["query"]}]}} =
+             Bee.ask("trimmed_labeled", [], server)
+
+    assert :ok = Bee.Query.Transform.remove(:strip)
   end
 end
