@@ -351,12 +351,12 @@ defmodule Bee.Repo do
   end
 
   def handle_call(:who_blocks_whom, _from, state) do
-    result = Bee.World.who_blocks_whom(state.dep_graph, state.alloc_graph)
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.who_blocks_whom/1)
     {:reply, result, state}
   end
 
   def handle_call({:agent_load, agent_id}, _from, state) do
-    result = Bee.World.agent_load(state.alloc_graph, agent_id, state.conn)
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.agent_load(&1, agent_id))
     {:reply, result, state}
   end
 
