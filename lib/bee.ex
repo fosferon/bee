@@ -80,6 +80,9 @@ defmodule Bee do
   def unblock(id, blocker_id, server \\ @default_server),
     do: GenServer.call(server, {:unblock, id, blocker_id})
 
+  def traverse(id, opts \\ [], server \\ @default_server) when is_list(opts),
+    do: GenServer.call(server, {:traverse, id, opts})
+
   def lock(id, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:lock, id, opts})
 

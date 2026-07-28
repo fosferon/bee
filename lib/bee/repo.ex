@@ -260,6 +260,22 @@ defmodule Bee.Repo do
   def handle_call({:block, _id, _blocker_id, _opts}, _from, state),
     do: {:reply, {:error, :unknown_dep_type}, state}
 
+  def handle_call({:traverse, id, opts}, _from, state) when is_list(opts) do
+    full_id = resolve_id(id, state.prefix)
+
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        with {:ok, ids} <- Bee.Store.Deps.traverse(conn, full_id, opts) do
+          {:ok, Enum.map(ids, &Bee.Id.parse!/1)}
+        end
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:traverse, _id, _opts}, _from, state),
+    do: {:reply, {:error, :invalid_spec}, state}
+
   def handle_call({:unblock, id, blocker_id}, _from, state) do
     full_id = resolve_id(id, state.prefix)
     full_blocker = resolve_id(blocker_id, state.prefix)
