@@ -531,17 +531,32 @@ defmodule Bee.Repo do
     full_id = resolve_id(id, state.prefix)
     full_blocker = resolve_id(blocker_id, state.prefix)
 
-    with :ok <- Bee.Dependency.Type.validate(type),
-         :ok <- Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker),
-         :ok <- Bee.Store.insert_dependency(state.conn, full_id, full_blocker, type) do
-      if type in Bee.Dependency.Type.gating() do
-        :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
-      end
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Dependency.Type.validate(type),
+             :ok <- Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker),
+             :ok <- Bee.Store.insert_dependency(state.conn, full_id, full_blocker, type),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full_id, "dep.added",
+                 fields: %{
+                   depends_on_id: full_blocker,
+                   dep_type: Bee.Dependency.Type.storage_name(type)
+                 }
+               ) do
+          {:ok, :blocked}
+        end
+      end)
 
-      state = schedule_export(state)
-      {:reply, :ok, state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case result do
+      {:ok, :blocked} ->
+        if type in Bee.Dependency.Type.gating() do
+          :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
+        end
+
+        {:reply, :ok, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 

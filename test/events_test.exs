@@ -104,6 +104,26 @@ defmodule Bee.Store.EventsTest do
     assert %{"fields" => %{"body" => "note"}} = Jason.decode!(payload)
   end
 
+  test "block commits one dep.added event", %{server: server} do
+    assert {:ok, _} = Bee.create("blocker", [], server)
+    assert {:ok, _} = Bee.create("dependent", [], server)
+    assert :ok = Bee.block(2, 1, server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, payload FROM events WHERE issue_id = ? AND seq = 2"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-2"])
+    assert {:row, ["dep.added", payload]} = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+
+    assert %{"fields" => %{"depends_on_id" => "test-1", "dep_type" => "blocks"}} =
+             Jason.decode!(payload)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
