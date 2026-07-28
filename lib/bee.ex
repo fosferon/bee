@@ -59,6 +59,9 @@ defmodule Bee do
   def register_measure(name, unit, server \\ @default_server),
     do: GenServer.call(server, {:register_measure, name, unit})
 
+  def measure(id, attrs, server \\ @default_server),
+    do: GenServer.call(server, {:measure, id, attrs})
+
   def tree_page(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
     GenServer.call(server, {:tree_page, opts})

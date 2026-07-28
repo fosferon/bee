@@ -237,6 +237,30 @@ defmodule Bee.Repo do
     end
   end
 
+  def handle_call({:measure, issue_id, attrs}, _from, state) do
+    full = resolve_id(issue_id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, _issue} <- Bee.Store.get_issue(state.conn, full),
+             {:ok, measurement} <- Bee.Store.Measurements.prepare(state.conn, attrs),
+             {:ok, seq} <-
+               Bee.Store.Events.record(state.conn, full, "measurement.recorded",
+                 fields: fn seq ->
+                   %{measure: Map.put(measurement, :seq, seq)}
+                 end
+               ),
+             :ok <- Bee.Store.Measurements.record(state.conn, full, seq, measurement) do
+          {:ok, :recorded}
+        end
+      end)
+
+    case result do
+      {:ok, :recorded} -> {:reply, :ok, schedule_export(state)}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->

@@ -6,8 +6,8 @@ defmodule Bee.Store.Events do
   @spec record(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
   def record(conn, issue_id, event_type, opts \\ []) do
-    with {:ok, payload} <- payload(opts),
-         {:ok, seq} <- next_sequence(conn, issue_id),
+    with {:ok, seq} <- next_sequence(conn, issue_id),
+         {:ok, payload} <- payload(opts, seq),
          :ok <-
            execute(
              conn,
@@ -28,12 +28,21 @@ defmodule Bee.Store.Events do
     end
   end
 
-  defp payload(opts) do
-    fields = opts |> Keyword.get(:fields, %{}) |> stringify_map() |> truncate_values()
+  defp payload(opts, seq) do
+    fields =
+      opts
+      |> Keyword.get(:fields, %{})
+      |> resolve_fields(seq)
+      |> stringify_map()
+      |> truncate_values()
+
     refs = opts |> Keyword.get(:refs, %{}) |> stringify_map()
     rejected = opts |> Keyword.get(:rejected, %{}) |> stringify_map()
     {:ok, %{fields: fields, refs: refs, rejected: rejected}}
   end
+
+  defp resolve_fields(fields, seq) when is_function(fields, 1), do: fields.(seq)
+  defp resolve_fields(fields, _seq), do: fields
 
   defp next_sequence(conn, issue_id) do
     {:ok, stmt} =

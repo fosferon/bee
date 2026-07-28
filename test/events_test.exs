@@ -209,6 +209,64 @@ defmodule Bee.Store.EventsTest do
     :ok = Exqlite.Sqlite3.release(conn, event_stmt)
   end
 
+  test "measure records a grammared actual measurement and one matching event", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [], server)
+
+    assert :ok =
+             Bee.measure(1, %{measure: "effort", value: 30, dims: %{"agent" => "bee"}}, server)
+
+    conn = GenServer.call(server, :conn)
+
+    {:ok, measurement_stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT seq, measure, value, unit, dims FROM measurements WHERE issue_id = ?"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(measurement_stmt, ["test-1"])
+
+    assert {:row, [2, "effort", 30.0, "minutes", ~s({"agent":"bee","kind":"actual"})]} =
+             Exqlite.Sqlite3.step(conn, measurement_stmt)
+
+    :ok = Exqlite.Sqlite3.release(conn, measurement_stmt)
+
+    {:ok, event_stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, payload FROM events WHERE issue_id = ? AND seq = 2"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(event_stmt, ["test-1"])
+    assert {:row, ["measurement.recorded", payload]} = Exqlite.Sqlite3.step(conn, event_stmt)
+    :ok = Exqlite.Sqlite3.release(conn, event_stmt)
+
+    assert %{
+             "fields" => %{
+               "measure" => %{
+                 "dims" => %{"agent" => "bee", "kind" => "actual"},
+                 "measure" => "effort",
+                 "seq" => 2,
+                 "unit" => "minutes",
+                 "value" => 30.0
+               }
+             }
+           } = Jason.decode!(payload)
+  end
+
+  test "measure rejects unknown measures and invalid dimensions without events", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [], server)
+    assert {:error, :unknown_measure} = Bee.measure(1, %{measure: "cost", value: 1}, server)
+
+    assert {:error, :invalid_dimension_key} =
+             Bee.measure(1, %{measure: "effort", value: 1, dims: %{"Agent" => "bee"}}, server)
+
+    conn = GenServer.call(server, :conn)
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
