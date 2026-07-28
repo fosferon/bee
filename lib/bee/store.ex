@@ -144,8 +144,8 @@ defmodule Bee.Store do
 
     sql = """
     INSERT INTO issues (id, title, description, status, priority, issue_type,
-                        project_id, assigned_to, parent, created_at, created_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        project_id, assigned_to, parent, created_at, created_by, updated_at, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     exec(conn, sql, [
@@ -160,7 +160,8 @@ defmodule Bee.Store do
       Map.get(attrs, :parent),
       Map.get(attrs, :created_at, now),
       Map.get(attrs, :created_by),
-      now
+      now,
+      Map.get(attrs, :metadata, "{}")
     ])
 
     labels = Map.get(attrs, :labels, [])
@@ -248,6 +249,7 @@ defmodule Bee.Store do
     {sets, vals} = maybe_set(sets, vals, attrs, :project_id)
     {sets, vals} = maybe_set(sets, vals, attrs, :parent)
     {sets, vals} = maybe_set(sets, vals, attrs, :close_reason)
+    {sets, vals} = maybe_set(sets, vals, attrs, :metadata)
 
     {sets, vals} =
       if Map.has_key?(attrs, :closed_at) do
@@ -918,7 +920,8 @@ defmodule Bee.Store do
       created_by: map["created_by"],
       updated_at: map["updated_at"],
       closed_at: map["closed_at"],
-      close_reason: map["close_reason"]
+      close_reason: map["close_reason"],
+      metadata: Bee.Store.Metadata.decode(map["metadata"])
     }
   end
 

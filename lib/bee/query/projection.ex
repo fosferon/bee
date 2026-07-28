@@ -28,7 +28,8 @@ defmodule Bee.Query.Projection do
       :updated_at,
       :description,
       :closed_at,
-      :close_reason
+      :close_reason,
+      :metadata
     ],
     full: [
       :id,
@@ -43,7 +44,8 @@ defmodule Bee.Query.Projection do
       :updated_at,
       :description,
       :closed_at,
-      :close_reason
+      :close_reason,
+      :metadata
     ]
   }
 

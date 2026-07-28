@@ -5,18 +5,38 @@ defmodule Bee.Agents do
   def insert_project(conn, id, attrs \\ %{}) do
     now = now_iso()
 
-    run_sql(
-      conn,
-      "INSERT OR IGNORE INTO projects (id, name, path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [
-        id,
-        Map.get(attrs, :name, id),
-        Map.get(attrs, :path),
-        Map.get(attrs, :status, "active"),
-        now,
-        now
-      ]
-    )
+    if Map.has_key?(attrs, :metadata) do
+      run_sql(
+        conn,
+        """
+        INSERT INTO projects (id, name, path, status, created_at, updated_at, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET metadata = excluded.metadata, updated_at = excluded.updated_at
+        """,
+        [
+          id,
+          Map.get(attrs, :name, id),
+          Map.get(attrs, :path),
+          Map.get(attrs, :status, "active"),
+          now,
+          now,
+          Map.fetch!(attrs, :metadata)
+        ]
+      )
+    else
+      run_sql(
+        conn,
+        "INSERT OR IGNORE INTO projects (id, name, path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          id,
+          Map.get(attrs, :name, id),
+          Map.get(attrs, :path),
+          Map.get(attrs, :status, "active"),
+          now,
+          now
+        ]
+      )
+    end
 
     get_project(conn, id)
   end
@@ -179,7 +199,15 @@ defmodule Bee.Agents do
     end
   end
 
-  defp row_to_map(cols, row), do: Enum.zip(cols, row) |> Map.new()
+  defp row_to_map(cols, row) do
+    map = Enum.zip(cols, row) |> Map.new()
+
+    if Map.has_key?(map, "metadata") do
+      Map.update!(map, "metadata", &Bee.Store.Metadata.decode/1)
+    else
+      map
+    end
+  end
 
   defp now_iso, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end

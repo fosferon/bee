@@ -91,35 +91,41 @@ defmodule Bee.Repo do
       transaction(state.conn, fn ->
         id = Bee.Id.next(state.conn, state.prefix)
 
-        attrs = %{
-          id: id,
-          title: title,
-          description: Keyword.get(opts, :description),
-          priority: Keyword.get(opts, :priority),
-          issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
-          labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
-          parent: format_parent(Keyword.get(opts, :parent), state.prefix),
-          project_id: Keyword.get(opts, :project_id),
-          created_by: Keyword.get(opts, :actor)
-        }
+        with {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
+          attrs = %{
+            id: id,
+            title: title,
+            description: Keyword.get(opts, :description),
+            priority: Keyword.get(opts, :priority),
+            issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
+            labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
+            parent: format_parent(Keyword.get(opts, :parent), state.prefix),
+            project_id: Keyword.get(opts, :project_id),
+            created_by: Keyword.get(opts, :actor),
+            metadata: metadata
+          }
 
-        with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
-             {:ok, _seq} <-
-               Bee.Store.Events.record(state.conn, id, "issue.created",
-                 actor: attrs.created_by,
-                 fields:
-                   Map.take(attrs, [
-                     :id,
-                     :title,
-                     :description,
-                     :priority,
-                     :issue_type,
-                     :parent,
-                     :project_id,
-                     :created_by
-                   ])
-               ) do
-          {:ok, {id, attrs, issue}}
+          with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
+               {:ok, _seq} <-
+                 Bee.Store.Events.record(state.conn, id, "issue.created",
+                   actor: attrs.created_by,
+                   fields:
+                     attrs
+                     |> Map.take([
+                       :id,
+                       :title,
+                       :description,
+                       :priority,
+                       :issue_type,
+                       :parent,
+                       :project_id,
+                       :created_by,
+                       :metadata
+                     ])
+                     |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
+                 ) do
+            {:ok, {id, attrs, issue}}
+          end
         end
       end)
 
@@ -311,6 +317,13 @@ defmodule Bee.Repo do
                      fields: fn seq ->
                        fields = Map.drop(issue_attrs, [:labels])
 
+                       fields =
+                         if Map.has_key?(fields, :metadata) do
+                           Map.update!(fields, :metadata, &Bee.Store.Metadata.decode/1)
+                         else
+                           fields
+                         end
+
                        if measurement do
                          Map.put(fields, :measure, Map.put(measurement, :seq, seq))
                        else
@@ -473,9 +486,22 @@ defmodule Bee.Repo do
   end
 
   def handle_call({:register_project, id, attrs}, _from, state) do
-    result = Bee.Agents.insert_project(state.conn, id, attrs)
-    Bee.World.add_project(state.alloc_graph, id)
-    {:reply, result, state}
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, attrs} <- normalize_metadata(attrs),
+             {:ok, project} <- Bee.Agents.insert_project(state.conn, id, attrs) do
+          {:ok, project}
+        end
+      end)
+
+    case result do
+      {:ok, project} ->
+        Bee.World.add_project(state.alloc_graph, id)
+        {:reply, {:ok, project}, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:register_agent, id, attrs}, _from, state) do
@@ -883,9 +909,21 @@ defmodule Bee.Repo do
         attrs
       end
 
-    case validate_parent_update(attrs, issue_id, state.conn) do
-      :ok -> {:ok, attrs}
-      {:error, _reason} = error -> error
+    with {:ok, attrs} <- normalize_metadata(attrs),
+         :ok <- validate_parent_update(attrs, issue_id, state.conn) do
+      {:ok, attrs}
+    end
+  end
+
+  defp normalize_metadata(attrs) do
+    case Map.fetch(attrs, :metadata) do
+      {:ok, metadata} ->
+        with {:ok, encoded} <- Bee.Store.Metadata.encode(metadata) do
+          {:ok, Map.put(attrs, :metadata, encoded)}
+        end
+
+      :error ->
+        {:ok, attrs}
     end
   end
 
