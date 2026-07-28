@@ -246,9 +246,10 @@ defmodule Bee.Repo do
     full_id = resolve_id(id, state.prefix)
     full_blocker = resolve_id(blocker_id, state.prefix)
 
-    case Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker) do
+    case Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker) do
       :ok ->
-        Bee.Store.insert_dependency(state.conn, full_id, full_blocker)
+        :ok = Bee.Store.insert_dependency(state.conn, full_id, full_blocker)
+        :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
         state = schedule_export(state)
         {:reply, :ok, state}
 
