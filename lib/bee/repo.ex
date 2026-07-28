@@ -87,25 +87,51 @@ defmodule Bee.Repo do
   def handle_call(:conn, _from, state), do: {:reply, state.conn, state}
 
   def handle_call({:create, title, opts}, _from, state) do
-    id = Bee.Id.next(state.conn, state.prefix)
+    result =
+      transaction(state.conn, fn ->
+        id = Bee.Id.next(state.conn, state.prefix)
 
-    attrs = %{
-      id: id,
-      title: title,
-      description: Keyword.get(opts, :description),
-      priority: Keyword.get(opts, :priority),
-      issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
-      labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
-      parent: format_parent(Keyword.get(opts, :parent), state.prefix),
-      project_id: Keyword.get(opts, :project_id),
-      created_by: Keyword.get(opts, :actor)
-    }
+        attrs = %{
+          id: id,
+          title: title,
+          description: Keyword.get(opts, :description),
+          priority: Keyword.get(opts, :priority),
+          issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
+          labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
+          parent: format_parent(Keyword.get(opts, :parent), state.prefix),
+          project_id: Keyword.get(opts, :project_id),
+          created_by: Keyword.get(opts, :actor)
+        }
 
-    {:ok, issue} = Bee.Store.insert_issue(state.conn, attrs)
-    Bee.Graph.add_vertex(state.dep_graph, id)
-    Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
-    state = schedule_export(state)
-    {:reply, {:ok, issue}, state}
+        with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, id, "issue.created",
+                 actor: attrs.created_by,
+                 fields:
+                   Map.take(attrs, [
+                     :id,
+                     :title,
+                     :description,
+                     :priority,
+                     :issue_type,
+                     :parent,
+                     :project_id,
+                     :created_by
+                   ])
+               ) do
+          {:ok, {id, attrs, issue}}
+        end
+      end)
+
+    case result do
+      {:ok, {id, attrs, issue}} ->
+        Bee.Graph.add_vertex(state.dep_graph, id)
+        Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
+        {:reply, {:ok, issue}, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
   end
 
   def handle_call({:get, id}, _from, state) do
@@ -491,6 +517,25 @@ defmodule Bee.Repo do
       {:reply, :ok, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp transaction(conn, fun) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE"),
+         {:ok, result} <- fun.(),
+         :ok <- execute(conn, "COMMIT") do
+      {:ok, result}
+    else
+      {:error, _reason} = error ->
+        _ = execute(conn, "ROLLBACK")
+        error
+    end
+  end
+
+  defp execute(conn, sql) do
+    case Exqlite.Sqlite3.execute(conn, sql) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

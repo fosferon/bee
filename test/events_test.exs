@@ -29,7 +29,7 @@ defmodule Bee.Store.EventsTest do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
 
-    assert {:ok, 1} =
+    assert {:ok, 2} =
              Bee.Store.Events.record(conn, "test-1", "issue.updated",
                actor: "agent",
                fields: %{status: "closed"},
@@ -39,7 +39,7 @@ defmodule Bee.Store.EventsTest do
     {:ok, stmt} =
       Exqlite.Sqlite3.prepare(
         conn,
-        "SELECT event_type, payload, actor FROM events WHERE issue_id = ? AND seq = 1"
+        "SELECT event_type, payload, actor FROM events WHERE issue_id = ? AND seq = 2"
       )
 
     :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
@@ -54,15 +54,33 @@ defmodule Bee.Store.EventsTest do
            } = Jason.decode!(payload)
   end
 
+  test "create commits one issue.created event", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [actor: "agent"], server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, actor, payload FROM events WHERE issue_id = ? AND seq = 1"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, ["issue.created", "agent", payload]} = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+    assert %{"fields" => %{"title" => "subject"}} = Jason.decode!(payload)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
     body = String.duplicate("a", 2_100)
 
-    assert {:ok, 1} =
+    assert {:ok, 2} =
              Bee.Store.Events.record(conn, "test-1", "issue.updated", fields: %{body: body})
 
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT payload FROM events WHERE issue_id = ?")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT payload FROM events WHERE issue_id = ? AND seq = 2")
+
     :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
     assert {:row, [payload]} = Exqlite.Sqlite3.step(conn, stmt)
     :ok = Exqlite.Sqlite3.release(conn, stmt)
@@ -78,10 +96,12 @@ defmodule Bee.Store.EventsTest do
     conn = GenServer.call(server, :conn)
     body = String.duplicate("😀", 600)
 
-    assert {:ok, 1} =
+    assert {:ok, 2} =
              Bee.Store.Events.record(conn, "test-1", "issue.updated", fields: %{body: body})
 
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT payload FROM events WHERE issue_id = ?")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT payload FROM events WHERE issue_id = ? AND seq = 2")
+
     :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
     assert {:row, [payload]} = Exqlite.Sqlite3.step(conn, stmt)
     :ok = Exqlite.Sqlite3.release(conn, stmt)
@@ -96,8 +116,8 @@ defmodule Bee.Store.EventsTest do
     {:ok, _} = Bee.create("second", [], server)
     conn = GenServer.call(server, :conn)
 
-    assert {:ok, 1} = Bee.Store.Events.record(conn, "test-1", "issue.updated")
     assert {:ok, 2} = Bee.Store.Events.record(conn, "test-1", "issue.updated")
-    assert {:ok, 1} = Bee.Store.Events.record(conn, "test-2", "issue.updated")
+    assert {:ok, 3} = Bee.Store.Events.record(conn, "test-1", "issue.updated")
+    assert {:ok, 2} = Bee.Store.Events.record(conn, "test-2", "issue.updated")
   end
 end
