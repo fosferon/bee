@@ -370,7 +370,7 @@ defmodule Bee.Repo do
   end
 
   def handle_call(:bottlenecks, _from, state) do
-    result = Bee.World.bottlenecks(state.dep_graph, state.alloc_graph, state.conn)
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.bottlenecks/1)
     {:reply, result, state}
   end
 
