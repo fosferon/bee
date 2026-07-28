@@ -104,6 +104,19 @@ defmodule Bee.Graph.RollupTest do
              Bee.rollup(1, [scope: :critical_path], server)
   end
 
+  test "critical_path handles shared blockers without recomputing the result", %{server: server} do
+    create_issues(server, 5)
+    assert :ok = Bee.block(1, 2, server)
+    assert :ok = Bee.block(1, 3, server)
+    assert :ok = Bee.block(2, 4, server)
+    assert :ok = Bee.block(3, 4, server)
+    assert :ok = Bee.block(4, 5, server)
+    Enum.each(1..5, &measure(server, &1, 1))
+
+    assert {:ok, %{total: 4.0, covered: 4, missing: 0}} =
+             Bee.rollup(1, [scope: :critical_path], server)
+  end
+
   test "unknown issue returns not_found", %{server: server} do
     assert {:error, :not_found} = Bee.rollup(99, [], server)
   end

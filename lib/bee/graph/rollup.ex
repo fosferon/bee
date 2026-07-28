@@ -121,7 +121,7 @@ defmodule Bee.Graph.Rollup do
   defp select_critical_path(rows, values, conn, issue_id, :critical_path) do
     ids = MapSet.new(Enum.map(rows, & &1.id))
     edges = gating_edges(conn, ids)
-    path = longest_path(issue_id, edges, values, %{})
+    {path, _memo} = longest_path(issue_id, edges, values, %{})
     Enum.filter(rows, &(&1.id in path))
   end
 
@@ -147,30 +147,24 @@ defmodule Bee.Graph.Rollup do
   defp longest_path(id, edges, values, memo) do
     case Map.fetch(memo, id) do
       {:ok, path} ->
-        path
+        {path, memo}
 
       :error ->
-        children = Map.get(edges, id, [])
+        {child_path, memo} =
+          Enum.reduce(Map.get(edges, id, []), {[], memo}, fn child, {best_path, memo} ->
+            {path, memo} = longest_path(child, edges, values, memo)
 
-        path =
-          case children do
-            [] ->
-              [id]
+            if path_weight(path, values) > path_weight(best_path, values),
+              do: {path, memo},
+              else: {best_path, memo}
+          end)
 
-            _ ->
-              child =
-                Enum.max_by(
-                  children,
-                  &path_weight(longest_path(&1, edges, values, memo), values)
-                )
-
-              [id | longest_path(child, edges, values, memo)]
-          end
-
-        path
+        path = [id | child_path]
+        {path, Map.put(memo, id, path)}
     end
   end
 
+  defp path_weight([], _values), do: 0.0
   defp path_weight(path, values), do: Enum.sum(Enum.map(path, &Map.fetch!(values, &1)))
 
   defp summarize(rows, values) do
