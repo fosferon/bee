@@ -70,11 +70,10 @@ defmodule Bee.Lock do
 
   @spec sweep_expired(Exqlite.Sqlite3.db()) :: integer()
   @doc """
-  Sweeps expired locks, emitting one event per expired lock (Story 3.5, AD-19).
+  Sweeps expired locks without emitting command events (AD-19).
 
-  Each lock release and its event emission are one transaction — a released
-  lock no longer matches the "expired AND held" query, so a re-dispatch is
-  a no-op, not a second event (cascade F3).
+  Each release remains transactional. A released lock no longer matches the
+  expired-and-held query, so a re-dispatch is a no-op.
   """
   def sweep_expired(conn) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -82,11 +81,9 @@ defmodule Bee.Lock do
     # Query all expired locks
     expired = query_expired_locks(conn, now)
 
-    # For each expired lock: release + emit event in one transaction
-    Enum.each(expired, fn {issue_id, locked_by} ->
+    Enum.each(expired, fn {issue_id, _locked_by} ->
       with :ok <- run_sql(conn, "BEGIN IMMEDIATE", []),
            :ok <- run_sql(conn, "DELETE FROM locks WHERE issue_id = ?", [issue_id]),
-           :ok <- Bee.Store.insert_event(conn, issue_id, actor: locked_by),
            :ok <- run_sql(conn, "COMMIT", []) do
         :ok
       else
@@ -99,7 +96,9 @@ defmodule Bee.Lock do
   end
 
   defp query_expired_locks(conn, now) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT issue_id, locked_by FROM locks WHERE expires_at < ?")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT issue_id, locked_by FROM locks WHERE expires_at < ?")
+
     :ok = Exqlite.Sqlite3.bind(stmt, [now])
 
     rows = collect_rows(conn, stmt, [])
