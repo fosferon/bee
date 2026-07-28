@@ -56,6 +56,9 @@ defmodule Bee do
   def remove_intent(name, server \\ @default_server),
     do: GenServer.call(server, {:remove_intent, name})
 
+  def register_measure(name, unit, server \\ @default_server),
+    do: GenServer.call(server, {:register_measure, name, unit})
+
   def tree_page(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
     GenServer.call(server, {:tree_page, opts})

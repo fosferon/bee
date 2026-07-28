@@ -222,6 +222,21 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call({:register_measure, name, unit}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        case Bee.Store.Measurements.register(state.conn, name, unit) do
+          :ok -> {:ok, :registered}
+          {:error, _reason} = error -> error
+        end
+      end)
+
+    case result do
+      {:ok, :registered} -> {:reply, :ok, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->

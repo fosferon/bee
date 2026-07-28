@@ -188,6 +188,27 @@ defmodule Bee.Store.EventsTest do
     assert %{"fields" => %{"assigned_to" => "agent"}} = Jason.decode!(payload)
   end
 
+  test "measure registration is unit-bound, idempotent, and event-free", %{server: server} do
+    assert :ok = Bee.register_measure("cost", "eur", server)
+    assert :ok = Bee.register_measure("cost", "eur", server)
+    assert {:error, :unit_mismatch} = Bee.register_measure("cost", "usd", server)
+    assert {:error, :invalid_measure} = Bee.register_measure("", "eur", server)
+    assert {:error, :invalid_measure} = Bee.register_measure("weight", "", server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT unit FROM measures WHERE name = ?")
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["cost"])
+    assert {:row, ["eur"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert :done = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+
+    {:ok, event_stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events")
+    assert {:row, [0]} = Exqlite.Sqlite3.step(conn, event_stmt)
+    :ok = Exqlite.Sqlite3.release(conn, event_stmt)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
