@@ -285,13 +285,21 @@ defmodule Bee.Repo do
   def handle_call({:comment, id, text, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
 
-    case Bee.Store.insert_comment(state.conn, full, text, opts) do
-      :ok ->
-        state = schedule_export(state)
-        {:reply, :ok, state}
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Store.insert_comment(state.conn, full, text, opts),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full, "issue.commented",
+                 actor: Keyword.get(opts, :author),
+                 fields: %{body: text}
+               ) do
+          {:ok, :commented}
+        end
+      end)
 
-      {:error, reason} ->
-        {:reply, {:error, classify_write_error(reason)}, state}
+    case result do
+      {:ok, :commented} -> {:reply, :ok, schedule_export(state)}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
     end
   end
 

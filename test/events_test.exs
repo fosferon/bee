@@ -87,6 +87,23 @@ defmodule Bee.Store.EventsTest do
     assert %{"fields" => %{"status" => "closed"}} = Jason.decode!(payload)
   end
 
+  test "comment commits one issue.commented event", %{server: server} do
+    assert {:ok, _} = Bee.create("subject", [], server)
+    assert :ok = Bee.comment(1, "note", [author: "agent"], server)
+    conn = GenServer.call(server, :conn)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT event_type, actor, payload FROM events WHERE issue_id = ? AND seq = 2"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, ["test-1"])
+    assert {:row, ["issue.commented", "agent", payload]} = Exqlite.Sqlite3.step(conn, stmt)
+    :ok = Exqlite.Sqlite3.release(conn, stmt)
+    assert %{"fields" => %{"body" => "note"}} = Jason.decode!(payload)
+  end
+
   test "truncates oversized payload values with digest metadata", %{server: server} do
     {:ok, _} = Bee.create("subject", [], server)
     conn = GenServer.call(server, :conn)
