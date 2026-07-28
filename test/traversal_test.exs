@@ -53,4 +53,12 @@ defmodule Bee.TraversalTest do
     assert {:ok, [%{issue_id: 2, reason: "same_project", confidence: 0.8}]} =
              Bee.candidates(1, server)
   end
+
+  test "critical path is derived from persisted gating edges", %{server: server} do
+    for title <- ["one", "two", "three"], do: {:ok, _} = Bee.create(title, [], server)
+    :ok = Bee.block(2, 1, server)
+    :ok = Bee.block(3, 2, server)
+
+    assert {:ok, [1, 2, 3]} = Bee.critical_path(server)
+  end
 end

@@ -40,6 +40,38 @@ defmodule Bee.Store.Deps do
     end
   end
 
+  @spec critical_path(Exqlite.Sqlite3.db()) :: [String.t()]
+  def critical_path(conn) do
+    types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)
+    placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+
+    sql = """
+    WITH RECURSIVE paths(id, path, depth) AS (
+      SELECT depends_on_id, depends_on_id, 1
+      FROM dependencies
+      WHERE dep_type IN (#{placeholders})
+      UNION ALL
+      SELECT dep.issue_id, paths.path || ',' || dep.issue_id, paths.depth + 1
+      FROM dependencies dep
+      INNER JOIN paths ON dep.depends_on_id = paths.id
+      WHERE dep.dep_type IN (#{placeholders})
+    )
+    SELECT path FROM paths ORDER BY depth DESC, path ASC LIMIT 1
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    :ok = Exqlite.Sqlite3.bind(stmt, types ++ types)
+
+    try do
+      case Exqlite.Sqlite3.step(conn, stmt) do
+        {:row, [path]} -> String.split(path, ",")
+        :done -> []
+      end
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
   defp direction(opts) do
     case Keyword.get(opts, :direction, :blockers) do
       value when value in @directions -> {:ok, value}

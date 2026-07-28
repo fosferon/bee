@@ -360,6 +360,15 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call(:critical_path, _from, state) do
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        {:ok, conn |> Bee.Store.Deps.critical_path() |> Enum.map(&Bee.Id.parse!/1)}
+      end)
+
+    {:reply, result, state}
+  end
+
   def handle_call(:bottlenecks, _from, state) do
     result = Bee.World.bottlenecks(state.dep_graph, state.alloc_graph, state.conn)
     {:reply, result, state}

@@ -86,6 +86,8 @@ defmodule Bee do
   def candidates(id, server \\ @default_server),
     do: GenServer.call(server, {:candidates, id})
 
+  def critical_path(server \\ @default_server), do: GenServer.call(server, :critical_path)
+
   def lock(id, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:lock, id, opts})
 
