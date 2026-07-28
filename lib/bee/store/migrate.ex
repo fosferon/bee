@@ -95,7 +95,8 @@ defmodule Bee.Store.Migrate do
       migration_002(),
       migration_003(),
       migration_004(),
-      migration_005()
+      migration_005(),
+      migration_006()
     ]
 
   @spec migration_000() :: migration()
@@ -115,6 +116,9 @@ defmodule Bee.Store.Migrate do
 
   @spec migration_005() :: migration()
   def migration_005, do: {6, :add_event_envelope, &add_event_envelope/1}
+
+  @spec migration_006() :: migration()
+  def migration_006, do: {7, :add_measure_domains, &add_measure_domains/1}
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
           {:ok, :fresh | :devman | :gc_daemon} | {:error, :unknown_baseline}
@@ -499,6 +503,24 @@ defmodule Bee.Store.Migrate do
       :ok -> :ok
       :error -> {:error, :event_envelope_failed}
       {:error, _reason} -> {:error, :event_envelope_failed}
+    end
+  end
+
+  defp add_measure_domains(conn) do
+    statements = [
+      "ALTER TABLE measures ADD COLUMN domain TEXT NOT NULL DEFAULT 'any'",
+      "UPDATE measures SET domain = 'non_negative' WHERE name = 'effort'"
+    ]
+
+    case Enum.reduce_while(statements, :ok, fn sql, :ok ->
+           case execute(conn, sql) do
+             :ok -> {:cont, :ok}
+             {:error, _reason} -> {:halt, :error}
+           end
+         end) do
+      :ok -> :ok
+      :error -> {:error, :measure_domains_failed}
+      {:error, _reason} -> {:error, :measure_domains_failed}
     end
   end
 

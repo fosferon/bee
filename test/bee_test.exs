@@ -51,7 +51,7 @@ defmodule BeeTest do
       Bee.Repo.start_link(db_path: db_path, prefix: "test", jsonl_path: nil, name: name)
 
     {:ok, conn} = Exqlite.Sqlite3.open(db_path)
-    assert {:ok, 6} = Bee.Store.Migrate.user_version(conn)
+    assert {:ok, 7} = Bee.Store.Migrate.user_version(conn)
     assert sqlite_table_exists?(conn, "issues_fts")
     refute sqlite_table_exists?(conn, "labels")
     # Migration 002: issues.metadata

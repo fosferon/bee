@@ -56,8 +56,17 @@ defmodule Bee do
   def remove_intent(name, server \\ @default_server),
     do: GenServer.call(server, {:remove_intent, name})
 
-  def register_measure(name, unit, server \\ @default_server),
-    do: GenServer.call(server, {:register_measure, name, unit})
+  def register_measure(name, unit),
+    do: GenServer.call(@default_server, {:register_measure, name, unit, []})
+
+  def register_measure(name, unit, opts) when is_list(opts),
+    do: GenServer.call(@default_server, {:register_measure, name, unit, opts})
+
+  def register_measure(name, unit, server),
+    do: GenServer.call(server, {:register_measure, name, unit, []})
+
+  def register_measure(name, unit, opts, server) when is_list(opts),
+    do: GenServer.call(server, {:register_measure, name, unit, opts})
 
   def measure(id, attrs, server \\ @default_server),
     do: GenServer.call(server, {:measure, id, attrs})

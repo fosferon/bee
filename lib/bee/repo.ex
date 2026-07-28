@@ -222,10 +222,10 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:register_measure, name, unit}, _from, state) do
+  def handle_call({:register_measure, name, unit, opts}, _from, state) do
     result =
       transaction(state.conn, fn ->
-        case Bee.Store.Measurements.register(state.conn, name, unit) do
+        case Bee.Store.Measurements.register(state.conn, name, unit, opts) do
           :ok -> {:ok, :registered}
           {:error, _reason} = error -> error
         end
@@ -741,25 +741,22 @@ defmodule Bee.Repo do
   defp flush_export(%{export_mode: :disabled}), do: :ok
 
   defp flush_export(state) do
-    # Hard bound: run export in a Task with a kill timeout (AD-17, audit A2)
-    # This is a hard bound, not a soft receive...after, because the Task
-    # process is killed if it exceeds the bound regardless of scheduler pressure.
     task =
       Task.async(fn ->
-        Bee.Export.export(state.conn, state.jsonl_path)
+        {:ok, conn} = Exqlite.Sqlite3.open(state.db_path)
+        :ok = Bee.Store.configure_pragmas(conn)
+
+        try do
+          Bee.Export.export(conn, state.jsonl_path)
+        after
+          Exqlite.Sqlite3.close(conn)
+        end
       end)
 
     case Task.yield(task, @export_flush_bound_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, :ok} ->
-        :ok
-
-      nil ->
-        Logger.warning("JSONL export exceeded flush bound (#{@export_flush_bound_ms}ms), skipped")
-        {:error, :flush_bound_exceeded}
-
-      {:exit, reason} ->
-        Logger.warning("JSONL export crashed: #{inspect(reason)}")
-        {:error, {:export_crashed, reason}}
+      {:ok, :ok} -> :ok
+      nil -> {:error, :flush_bound_exceeded}
+      {:exit, reason} -> {:error, {:export_crashed, reason}}
     end
   end
 

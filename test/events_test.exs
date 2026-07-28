@@ -189,18 +189,19 @@ defmodule Bee.Store.EventsTest do
   end
 
   test "measure registration is unit-bound, idempotent, and event-free", %{server: server} do
-    assert :ok = Bee.register_measure("cost", "eur", server)
-    assert :ok = Bee.register_measure("cost", "eur", server)
+    assert :ok = Bee.register_measure("cost", "eur", [domain: :non_negative], server)
+    assert :ok = Bee.register_measure("cost", "eur", [domain: :non_negative], server)
     assert {:error, :unit_mismatch} = Bee.register_measure("cost", "usd", server)
+    assert {:error, :domain_mismatch} = Bee.register_measure("cost", "eur", server)
     assert {:error, :invalid_measure} = Bee.register_measure("", "eur", server)
     assert {:error, :invalid_measure} = Bee.register_measure("weight", "", server)
     conn = GenServer.call(server, :conn)
 
     {:ok, stmt} =
-      Exqlite.Sqlite3.prepare(conn, "SELECT unit FROM measures WHERE name = ?")
+      Exqlite.Sqlite3.prepare(conn, "SELECT unit, domain FROM measures WHERE name = ?")
 
     :ok = Exqlite.Sqlite3.bind(stmt, ["cost"])
-    assert {:row, ["eur"]} = Exqlite.Sqlite3.step(conn, stmt)
+    assert {:row, ["eur", "non_negative"]} = Exqlite.Sqlite3.step(conn, stmt)
     assert :done = Exqlite.Sqlite3.step(conn, stmt)
     :ok = Exqlite.Sqlite3.release(conn, stmt)
 
@@ -268,6 +269,9 @@ defmodule Bee.Store.EventsTest do
 
     assert {:error, :invalid_measurement_kind} =
              Bee.measure(1, %{measure: "effort", value: 1}, server)
+
+    assert {:error, :invalid_measure_value} =
+             Bee.measure(1, %{measure: "effort", value: -1, dims: %{"kind" => "actual"}}, server)
 
     conn = GenServer.call(server, :conn)
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COUNT(*) FROM events WHERE issue_id = ?")

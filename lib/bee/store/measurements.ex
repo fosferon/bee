@@ -3,25 +3,47 @@ defmodule Bee.Store.Measurements do
 
   @spec register(Exqlite.Sqlite3.db(), String.t(), String.t()) ::
           :ok | {:error, :invalid_measure | :unit_mismatch | term()}
-  def register(conn, name, unit)
-      when is_binary(name) and name != "" and is_binary(unit) and unit != "" do
-    case registered_unit(conn, name) do
-      nil ->
-        execute(
-          conn,
-          "INSERT INTO measures (name, unit, registered_at) VALUES (?, ?, ?)",
-          [name, unit, now_iso()]
-        )
+  def register(conn, name, unit), do: register(conn, name, unit, [])
 
-      ^unit ->
-        :ok
+  @spec register(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
+          :ok
+          | {:error,
+             :invalid_measure
+             | :invalid_measure_domain
+             | :unit_mismatch
+             | :domain_mismatch
+             | term()}
+  def register(conn, name, unit, opts)
+      when is_binary(name) and name != "" and is_binary(unit) and unit != "" and is_list(opts) do
+    with {:ok, domain} <- domain(opts) do
+      case registered_measure(conn, name) do
+        nil ->
+          execute(
+            conn,
+            "INSERT INTO measures (name, unit, domain, registered_at) VALUES (?, ?, ?, ?)",
+            [name, unit, domain, now_iso()]
+          )
 
-      _other ->
-        {:error, :unit_mismatch}
+        %{unit: ^unit, domain: ^domain} ->
+          :ok
+
+        %{unit: ^unit} ->
+          {:error, :domain_mismatch}
+
+        _other ->
+          {:error, :unit_mismatch}
+      end
     end
   end
 
-  def register(_conn, _name, _unit), do: {:error, :invalid_measure}
+  def register(_conn, _name, _unit, _opts), do: {:error, :invalid_measure}
+
+  defp domain(opts) do
+    case Keyword.get(opts, :domain, :any) do
+      domain when domain in [:any, :non_negative] -> {:ok, Atom.to_string(domain)}
+      _ -> {:error, :invalid_measure_domain}
+    end
+  end
 
   @spec prepare(Exqlite.Sqlite3.db(), map()) ::
           {:ok,
@@ -40,10 +62,11 @@ defmodule Bee.Store.Measurements do
   def prepare(conn, attrs) when is_map(attrs) do
     with measure when is_binary(measure) and measure != "" <- fetch(attrs, :measure),
          value when is_number(value) <- fetch(attrs, :value),
-         unit when is_binary(unit) <- registered_unit(conn, measure),
+         %{unit: unit, domain: domain} <- registered_measure(conn, measure),
          dims when is_map(dims) <- fetch(attrs, :dims, %{}),
          :ok <- validate_dims(dims),
-         :ok <- validate_kind(dims) do
+         :ok <- validate_kind(dims),
+         :ok <- validate_domain(value, domain) do
       {:ok,
        %{
          measure: measure,
@@ -103,6 +126,10 @@ defmodule Bee.Store.Measurements do
   defp validate_kind(%{"kind" => kind}) when kind in ["estimate", "actual"], do: :ok
   defp validate_kind(_dims), do: {:error, :invalid_measurement_kind}
 
+  defp validate_domain(value, "non_negative") when value >= 0, do: :ok
+  defp validate_domain(_value, "non_negative"), do: {:error, :invalid_measure_value}
+  defp validate_domain(_value, "any"), do: :ok
+
   defp encode_dims(dims) do
     dims
     |> Enum.sort_by(fn {key, _value} -> key end)
@@ -110,13 +137,15 @@ defmodule Bee.Store.Measurements do
     |> then(&"{#{&1}}")
   end
 
-  defp registered_unit(conn, name) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT unit FROM measures WHERE name = ?")
+  defp registered_measure(conn, name) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT unit, domain FROM measures WHERE name = ?")
+
     :ok = Exqlite.Sqlite3.bind(stmt, [name])
 
     try do
       case Exqlite.Sqlite3.step(conn, stmt) do
-        {:row, [unit]} -> unit
+        {:row, [unit, domain]} -> %{unit: unit, domain: domain}
         :done -> nil
       end
     after
