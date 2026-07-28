@@ -40,17 +40,17 @@ defmodule Bee.Export do
         entry =
           if issue.project_id, do: Map.put(entry, "project_id", issue.project_id), else: entry
 
-        blocked_by_ids = Bee.Store.get_blocked_by(conn, raw_id)
+        dependencies = Bee.Store.get_dependencies(conn, raw_id)
 
         entry =
-          if blocked_by_ids != [] do
+          if dependencies != [] do
             deps =
-              Enum.map(blocked_by_ids, fn dep_id ->
+              Enum.map(dependencies, fn dependency ->
                 %{
                   "issue_id" => raw_id,
-                  "depends_on_id" => dep_id,
-                  "type" => "blocks",
-                  "created_at" => "0001-01-01T00:00:00Z"
+                  "depends_on_id" => dependency.depends_on_id,
+                  "type" => dependency.type,
+                  "created_at" => dependency.created_at
                 }
               end)
 
@@ -136,10 +136,17 @@ defmodule Bee.Export do
             )
           end)
 
-          # Dependencies are already idempotent (INSERT OR IGNORE)
           Enum.each(Map.get(data, "dependencies", []), fn dep ->
             depends_on = Map.get(dep, "depends_on_id")
-            if depends_on, do: Bee.Store.insert_dependency(conn, id, depends_on)
+
+            with true <- is_binary(depends_on),
+                 {:ok, type} <-
+                   Bee.Dependency.Type.from_storage_name(Map.get(dep, "type", "blocks")) do
+              Bee.Store.insert_dependency(conn, id, depends_on, type)
+            else
+              false -> :ok
+              {:error, _reason} -> :ok
+            end
           end)
         end)
 

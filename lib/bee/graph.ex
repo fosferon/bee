@@ -15,8 +15,16 @@ defmodule Bee.Graph do
     Exqlite.Sqlite3.release(conn, stmt)
     Enum.each(ids, &:digraph.add_vertex(graph, &1))
 
+    types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)
+    placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+
     {:ok, stmt} =
-      Exqlite.Sqlite3.prepare(conn, "SELECT issue_id, depends_on_id FROM dependencies")
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT issue_id, depends_on_id FROM dependencies WHERE dep_type IN (#{placeholders})"
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, types)
 
     deps = collect_pairs(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)

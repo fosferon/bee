@@ -53,6 +53,7 @@ defmodule Bee.Repo do
         # child. When standalone (tests), Repo starts it internally.
         pool_name = read_pool_name(opts)
         start_pool? = Keyword.get(opts, :start_pool?, true)
+
         pool_pid =
           if start_pool? do
             {:ok, pid} = Bee.Read.Pool.start_link(db_path: db_path, name: pool_name)
@@ -140,7 +141,9 @@ defmodule Bee.Repo do
         lane = Bee.Query.Classifier.classify(:list)
         result = read_with_pool(state, lane, fn conn -> Bee.Store.list_issues(conn, opts) end)
         {:reply, result, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -151,7 +154,8 @@ defmodule Bee.Repo do
         result = read_with_pool(state, lane, fn conn -> Bee.Store.count_issues(conn, opts) end)
         {:reply, result, state}
 
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -199,7 +203,8 @@ defmodule Bee.Repo do
         result = read_with_pool(state, lane, fn conn -> Bee.Store.list_tree_page(conn, opts) end)
         {:reply, result, state}
 
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -283,18 +288,30 @@ defmodule Bee.Repo do
 
   def handle_call({:candidates, id}, _from, state) do
     full_id = resolve_id(id, state.prefix)
-    result = read_with_pool(state, :compute, fn conn -> Bee.Query.Candidates.for_issue(conn, full_id) end)
+
+    result =
+      read_with_pool(state, :compute, fn conn -> Bee.Query.Candidates.for_issue(conn, full_id) end)
+
     {:reply, result, state}
   end
 
   def handle_call({:unblock, id, blocker_id}, _from, state) do
-    full_id = resolve_id(id, state.prefix)
-    full_blocker = resolve_id(blocker_id, state.prefix)
-    Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
-    Bee.Store.remove_dependency(state.conn, full_id, full_blocker)
-    state = schedule_export(state)
-    {:reply, :ok, state}
+    unblock_dependency(id, blocker_id, :blocks, state)
   end
+
+  def handle_call({:unblock, id, blocker_id, opts}, _from, state) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :type) do
+        {:ok, type} -> unblock_dependency(id, blocker_id, type, state)
+        :error -> unblock_dependency(id, blocker_id, :blocks, state)
+      end
+    else
+      {:reply, {:error, :unknown_dep_type}, state}
+    end
+  end
+
+  def handle_call({:unblock, _id, _blocker_id, _opts}, _from, state),
+    do: {:reply, {:error, :unknown_dep_type}, state}
 
   def handle_call({:lock, id, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
@@ -477,6 +494,23 @@ defmodule Bee.Repo do
     end
   end
 
+  defp unblock_dependency(id, blocker_id, type, state) do
+    full_id = resolve_id(id, state.prefix)
+    full_blocker = resolve_id(blocker_id, state.prefix)
+
+    with :ok <- Bee.Dependency.Type.validate(type),
+         :ok <- Bee.Store.remove_dependency(state.conn, full_id, full_blocker, type) do
+      unless Bee.Store.has_gating_dependency?(state.conn, full_id, full_blocker) do
+        :ok = Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
+      end
+
+      state = schedule_export(state)
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   defp schedule_export(%{jsonl_path: nil} = state), do: state
   defp schedule_export(%{export_mode: :disabled} = state), do: state
 
@@ -607,6 +641,7 @@ defmodule Bee.Repo do
       fun.(state.conn)
     end
   end
+
   defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
 
   defp normalize_update_attrs(attrs, issue_id, state) do

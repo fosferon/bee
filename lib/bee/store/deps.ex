@@ -2,8 +2,11 @@ defmodule Bee.Store.Deps do
   @moduledoc false
 
   @directions [:blockers, :dependents]
+  @max_traversal_depth 10
+  @max_critical_path_depth 100
 
-  @spec traverse(Exqlite.Sqlite3.db(), String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec traverse(Exqlite.Sqlite3.db(), String.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
   def traverse(conn, start_id, opts) do
     with {:ok, direction} <- direction(opts),
          {:ok, depth} <- depth(opts),
@@ -54,13 +57,13 @@ defmodule Bee.Store.Deps do
       SELECT dep.issue_id, paths.path || ',' || dep.issue_id, paths.depth + 1
       FROM dependencies dep
       INNER JOIN paths ON dep.depends_on_id = paths.id
-      WHERE dep.dep_type IN (#{placeholders})
+      WHERE paths.depth < ? AND dep.dep_type IN (#{placeholders})
     )
     SELECT path FROM paths ORDER BY depth DESC, path ASC LIMIT 1
     """
 
     {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
-    :ok = Exqlite.Sqlite3.bind(stmt, types ++ types)
+    :ok = Exqlite.Sqlite3.bind(stmt, types ++ [@max_critical_path_depth] ++ types)
 
     try do
       case Exqlite.Sqlite3.step(conn, stmt) do
@@ -81,7 +84,7 @@ defmodule Bee.Store.Deps do
 
   defp depth(opts) do
     case Keyword.get(opts, :depth, 3) do
-      value when is_integer(value) and value > 0 and value <= 10 -> {:ok, value}
+      value when is_integer(value) and value > 0 and value <= @max_traversal_depth -> {:ok, value}
       _ -> {:error, :invalid_spec}
     end
   end
@@ -89,7 +92,8 @@ defmodule Bee.Store.Deps do
   defp types(opts) do
     types = Keyword.get(opts, :types, Bee.Dependency.Type.gating())
 
-    if is_list(types) and Enum.all?(types, &(Bee.Dependency.Type.validate(&1) == :ok)) do
+    if is_list(types) and types != [] and
+         Enum.all?(types, &(Bee.Dependency.Type.validate(&1) == :ok)) do
       {:ok, Enum.map(types, &Bee.Dependency.Type.storage_name/1)}
     else
       {:error, :unknown_dep_type}

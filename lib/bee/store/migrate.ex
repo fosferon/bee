@@ -88,13 +88,14 @@ defmodule Bee.Store.Migrate do
   )
 
   @spec migrations() :: [migration()]
-  def migrations, do: [
-    migration_000(),
-    migration_001(),
-    migration_002(),
-    migration_003(),
-    migration_004()
-  ]
+  def migrations,
+    do: [
+      migration_000(),
+      migration_001(),
+      migration_002(),
+      migration_003(),
+      migration_004()
+    ]
 
   @spec migration_000() :: migration()
   def migration_000, do: {1, :baseline_normalization, &normalize_baseline/1}
@@ -826,7 +827,8 @@ defmodule Bee.Store.Migrate do
       actual_columns = table_columns(conn, table)
 
       actual_columns == expected_columns or
-        (table == "issues" and priority_default_zero?(actual_columns, expected_columns))
+        (table == "issues" and priority_default_zero?(actual_columns, expected_columns)) or
+        (table == "dependencies" and dependencies_pk_matches?(actual_columns, expected_columns))
     end)
   end
 
@@ -834,6 +836,14 @@ defmodule Bee.Store.Migrate do
     actual_columns ==
       Enum.map(expected_columns, fn
         {"priority", "INTEGER", 0, nil, 0} -> {"priority", "INTEGER", 0, "0", 0}
+        column -> column
+      end)
+  end
+
+  defp dependencies_pk_matches?(actual_columns, expected_columns) do
+    actual_columns ==
+      Enum.map(expected_columns, fn
+        {"dep_type", "TEXT", 1, "'blocks'", 0} -> {"dep_type", "TEXT", 1, "'blocks'", 3}
         column -> column
       end)
   end

@@ -71,9 +71,10 @@ defmodule Bee.Store do
         depends_on_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
         dep_type TEXT NOT NULL DEFAULT 'blocks',
         created_at TEXT NOT NULL,
-        PRIMARY KEY (issue_id, depends_on_id)
+        PRIMARY KEY (issue_id, depends_on_id, dep_type)
       )
       """,
+      "CREATE INDEX IF NOT EXISTS idx_dependencies_reverse ON dependencies (depends_on_id, dep_type)",
       """
       CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -497,7 +498,12 @@ defmodule Bee.Store do
     now = now_iso()
 
     # Get next seq for this issue
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE issue_id = ?")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE issue_id = ?"
+      )
+
     :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
     {:row, [seq]} = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
@@ -516,12 +522,16 @@ defmodule Bee.Store do
         now = now_iso()
         author = Keyword.get(opts, :author)
 
-        exec(conn, "INSERT INTO comments (issue_id, body, author, created_at) VALUES (?, ?, ?, ?)", [
-          issue_id,
-          body,
-          author,
-          now
-        ])
+        exec(
+          conn,
+          "INSERT INTO comments (issue_id, body, author, created_at) VALUES (?, ?, ?, ?)",
+          [
+            issue_id,
+            body,
+            author,
+            now
+          ]
+        )
 
       {:error, :not_found} ->
         {:error, :not_found}
@@ -595,14 +605,40 @@ defmodule Bee.Store do
     end
   end
 
-  @spec remove_dependency(Exqlite.Sqlite3.db(), String.t(), String.t()) :: :ok
-  def remove_dependency(conn, issue_id, depends_on_id) do
-    exec(conn, "DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?", [
-      issue_id,
-      depends_on_id
-    ])
+  @spec remove_dependency(Exqlite.Sqlite3.db(), String.t(), String.t(), atom()) ::
+          :ok | {:error, :unknown_dep_type | :unwritable_dep_type}
+  def remove_dependency(conn, issue_id, depends_on_id, type \\ :blocks) do
+    with :ok <- Bee.Dependency.Type.validate(type) do
+      exec(
+        conn,
+        "DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ? AND dep_type = ?",
+        [issue_id, depends_on_id, Bee.Dependency.Type.storage_name(type)]
+      )
+    end
+  end
 
-    :ok
+  @spec has_gating_dependency?(Exqlite.Sqlite3.db(), String.t(), String.t()) :: boolean()
+  def has_gating_dependency?(conn, issue_id, depends_on_id) do
+    types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)
+    placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        """
+        SELECT 1 FROM dependencies
+        WHERE issue_id = ? AND depends_on_id = ? AND dep_type IN (#{placeholders})
+        LIMIT 1
+        """
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id, depends_on_id | types])
+
+    try do
+      match?({:row, _}, Exqlite.Sqlite3.step(conn, stmt))
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
   end
 
   @spec get_blocked_by(Exqlite.Sqlite3.db(), String.t()) :: [String.t()]
@@ -631,6 +667,31 @@ defmodule Bee.Store do
     result = collect_scalars(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
     result
+  end
+
+  @spec get_dependencies(Exqlite.Sqlite3.db(), String.t()) :: [map()]
+  def get_dependencies(conn, issue_id) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        """
+        SELECT depends_on_id, dep_type, created_at
+        FROM dependencies
+        WHERE issue_id = ?
+        ORDER BY depends_on_id ASC, dep_type ASC
+        """
+      )
+
+    :ok = Exqlite.Sqlite3.bind(stmt, [issue_id])
+
+    try do
+      collect_rows(conn, stmt)
+      |> Enum.map(fn {_columns, [depends_on_id, type, created_at]} ->
+        %{depends_on_id: depends_on_id, type: type, created_at: created_at}
+      end)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
   end
 
   # --- Query builders ---
