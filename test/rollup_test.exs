@@ -117,6 +117,18 @@ defmodule Bee.Graph.RollupTest do
              Bee.rollup(1, [scope: :critical_path], server)
   end
 
+  test "critical_path retains a zero-effort child path", %{server: server} do
+    create_issues(server, 2)
+    assert :ok = Bee.block(1, 2, server)
+    measure(server, 1, 0)
+    measure(server, 2, 0)
+
+    assert {:ok, result} = Bee.rollup(1, [scope: :critical_path], server)
+    assert result.total == 0.0
+    assert result.covered == 2
+    assert result.missing == 0
+  end
+
   test "unknown issue returns not_found", %{server: server} do
     assert {:error, :not_found} = Bee.rollup(99, [], server)
   end

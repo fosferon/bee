@@ -154,7 +154,7 @@ defmodule Bee.Graph.Rollup do
           Enum.reduce(Map.get(edges, id, []), {[], memo}, fn child, {best_path, memo} ->
             {path, memo} = longest_path(child, edges, values, memo)
 
-            if path_weight(path, values) > path_weight(best_path, values),
+            if best_path == [] or path_weight(path, values) > path_weight(best_path, values),
               do: {path, memo},
               else: {best_path, memo}
           end)
