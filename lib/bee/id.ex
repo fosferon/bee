@@ -47,17 +47,17 @@ defmodule Bee.Id do
     :ok
   end
 
-  # --- AD-24: single-point id conversion ---
+  # --- single-point id conversion ---
 
   @doc """
   Parses a prefixed string id to its integer form.
 
   Accepts:
-  - `"GC-805"` → `{:ok, 805}`
+  - `"app-805"` → `{:ok, 805}`
   - `805` (already integer) → `{:ok, 805}` (idempotent)
 
   Rejects:
-  - `"GC-"` (prefix only, no number) → `{:error, :invalid_id}`
+  - `"app-"` (prefix only, no number) → `{:error, :invalid_id}`
   - `nil` → `{:error, :invalid_id}`
   - `""` → `{:error, :invalid_id}`
   """
@@ -83,7 +83,7 @@ defmodule Bee.Id do
   @doc """
   Parses a prefixed string id to its integer form, raising on invalid input.
 
-  Raises `ArgumentError` for malformed ids (AD-25: structural error → raise).
+  Raises `ArgumentError` for malformed ids.
   """
   @spec parse!(id_input()) :: integer()
   def parse!(id) do
@@ -97,14 +97,14 @@ defmodule Bee.Id do
   Converts an integer or bare-number string to a prefixed string id.
 
   Accepts:
-  - `805, "GC"` → `"GC-805"`
-  - `"GC-805", "GC"` → `"GC-805"` (already prefixed, idempotent)
-  - `"805", "GC"` → `"GC-805"` (bare number string)
+  - `805, "app"` → `"app-805"`
+  - `"app-805", "app"` → `"app-805"` (already prefixed, idempotent)
+  - `"805", "app"` → `"app-805"` (bare number string)
 
   Rejects (raises `ArgumentError`):
   - `nil` → raise
   - `""` → raise
-  - `"GC-"` (prefix only) → raise
+  - `"app-"` (prefix only) → raise
 
   Projects and agents use free-form string ids outside this grammar;
   they pass through unchanged when they already contain a hyphen.

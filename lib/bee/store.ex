@@ -108,7 +108,7 @@ defmodule Bee.Store do
   end
 
   @doc """
-  Sets WAL mode and safety PRAGMAs on any connection (AD-23).
+  Sets WAL mode and safety PRAGMAs on any connection.
 
   Every connection — writer, reader, or migration — must call this on open.
   WAL mode is database-level (set once), but foreign_keys, busy_timeout,
@@ -124,7 +124,7 @@ defmodule Bee.Store do
   end
 
   @doc """
-  Runs a WAL checkpoint (AD-23).
+  Runs a WAL checkpoint.
 
   - `:passive` — makes incremental progress; used on a timer.
   - `:truncate` — truncates the WAL back to zero; succeeds only when no
@@ -301,7 +301,7 @@ defmodule Bee.Store do
 
   Returns `:ok` or `{:error, reason}` where `reason` is drawn from the closed
   vocabulary `{:invalid_order_by | :invalid_limit | :invalid_offset, value}`.
-  Pure — it never raises. This is the shared validator (Story 1.1 / AD-25): the
+  Pure — it never raises. This is the shared validator: the
   module API raises on the error via `validate_opts!/1`; the server boundary
   (`Bee.Repo`) returns it, so a bad option arriving by message can never raise
   inside `handle_call` and take the single writer down.
@@ -870,7 +870,7 @@ defmodule Bee.Store do
   # Fail soft: a hard `:done = step(...)` match turned a SQLite constraint
   # error (e.g. a FOREIGN KEY violation from a comment/lock/dependency
   # referencing a missing issue) into a `{:badmatch}` that crashed the owning
-  # `Bee.Repo` GenServer and surfaced as HTTP 500 (GC-3353). We now surface the
+  # `Bee.Repo` GenServer and surfaced as HTTP 500. We now surface the
   # error to the caller and always release the statement.
   @spec exec(Exqlite.Sqlite3.db(), String.t(), list()) :: :ok | {:error, term()}
   defp exec(conn, sql, params) do

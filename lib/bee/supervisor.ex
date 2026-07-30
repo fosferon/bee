@@ -1,9 +1,21 @@
 defmodule Bee.Supervisor do
-  @moduledoc false
+  @moduledoc """
+  The supervision tree for a Bee instance.
+
+  Add it to your application's supervision tree to get a fully managed Bee: a
+  single-writer Repo, a two-lane read-only connection pool, and a lock sweeper, all
+  over one SQLite database. Migrations run at boot, in order, before any children start.
+
+      children = [
+        {Bee.Supervisor, db_path: "priv/bee.db", prefix: "bee"}
+      ]
+
+  See the README for the full option list and the concurrency model.
+  """
   use Supervisor
 
   @doc """
-  Starts the Bee supervision tree with :rest_for_one semantics (AD-22).
+  Starts the Bee supervision tree with `:rest_for_one` semantics.
 
   ## Boot sequence
 
@@ -12,9 +24,9 @@ defmodule Bee.Supervisor do
      task and the Repo both accessing the DB.
   2. **Repo** (GenServer, traps exits) — writer + graph owner.
   3. **Read.Pool** (Supervisor) — two-lane NimblePool for read-only connections.
-  4. **Sweeper** (GenServer) — lock-sweeper (Story 3.5; placeholder here).
+  4. **Sweeper** (GenServer) — releases expired locks.
 
-  ## Shutdown invariant (AD-22, Story 3.3)
+  ## Shutdown guarantees
 
   Three exit paths, each with a different guarantee:
 
@@ -30,7 +42,7 @@ defmodule Bee.Supervisor do
   On brutal kill: terminate/2 does NOT run. The WAL may contain uncommitted
   pages; the next boot's PASSIVE checkpoint timer (60s) recovers. The JSONL
   trail may miss the last event window; it is recoverable by re-export since
-  JSONL is derived from the DB (AD-17).
+  JSONL is derived from the DB.
 
   ## :rest_for_one semantics
 

@@ -1,5 +1,21 @@
 defmodule Bee.Repo do
-  @moduledoc false
+  @moduledoc """
+  The GenServer that owns the writer connection, the in-memory dependency and
+  allocation graphs, and the JSONL export. Backs the `Bee.*` module API.
+
+  Start it directly for tests or single-process use:
+
+      {:ok, _pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "bee", jsonl_path: nil, name: :my_bee)
+
+  In a supervised application, prefer `Bee.Supervisor`, which also starts the
+  read-only connection pool and the lock sweeper.
+
+  `Bee.Repo` also exposes a versioned GenServer **message protocol** — the wire
+  contract for node-crossing consumers (`{:create, title, opts}`, `{:ready, opts}`,
+  ...). It is a supported surface, equal to the `Bee.*` API; see the README's
+  "Two consumption surfaces" section.
+  """
   use GenServer
   require Logger
 
@@ -8,10 +24,16 @@ defmodule Bee.Repo do
   @export_debounce_ms 5_000
   @export_flush_bound_ms 10_000
 
+  @doc """
+  Starts the Repo GenServer. Options: `:db_path` (required), `:prefix`,
+  `:jsonl_path`, `:name`, and `:start_pool?` (default `true`; set `false` when
+  running under `Bee.Supervisor`, which owns the pool).
+  """
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  @doc false
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -48,7 +70,7 @@ defmodule Bee.Repo do
         # Sweeper is a separate process (Story 3.5) — no timer needed here.
         schedule_checkpoint()
 
-        # Start the reader pool (AD-2, AD-3). When running under
+        # Start the reader pool. When running under
         # Bee.Supervisor (start_pool?: false), the pool is a separate
         # child. When standalone (tests), Repo starts it internally.
         pool_name = read_pool_name(opts)
@@ -83,6 +105,7 @@ defmodule Bee.Repo do
 
   # --- GenServer calls ---
 
+  @doc false
   @impl true
   def handle_call(:conn, _from, state), do: {:reply, state.conn, state}
 
@@ -591,12 +614,13 @@ defmodule Bee.Repo do
 
   def handle_call(:sweep_expired_locks, _from, state) do
     # Story 3.5: Sweeper dispatches through the writer (no own connection).
-    # One event per expired lock, release + event in one transaction (AD-19).
+    # One event per expired lock, release + event in one transaction.
     swept = Bee.Lock.sweep_expired(state.conn)
     state = schedule_export(state)
     {:reply, swept, state}
   end
 
+  @doc false
   @impl true
   def handle_info(:checkpoint, state) do
     :ok = Bee.Store.wal_checkpoint(state.conn, :passive)
@@ -617,15 +641,17 @@ defmodule Bee.Repo do
     {:noreply, state}
   end
 
+  @doc false
   @impl true
   def handle_cast({:record_intent_usage, name, kind}, state) do
     _ = Bee.Store.Intents.record_usage(state.conn, name, kind)
     {:noreply, state}
   end
 
+  @doc false
   @impl true
   def terminate(_reason, state) do
-    # AD-23: Stop the reader pool first (if we own it) so all read
+    # Stop the reader pool first (if we own it) so all read
     # connections release the WAL before the writer's TRUNCATE checkpoint.
     # Under Bee.Supervisor, the pool is a separate child that dies first
     # via reverse-order shutdown — so we only stop it here if we started it.
@@ -639,7 +665,7 @@ defmodule Bee.Repo do
       end
     end
 
-    # AD-23: TRUNCATE checkpoint succeeds here because the reader pool
+    # TRUNCATE checkpoint succeeds here because the reader pool
     # is now dead — no persistent readers hold the WAL.
     try do
       Bee.Store.wal_checkpoint(state.conn, :truncate)
@@ -647,7 +673,7 @@ defmodule Bee.Repo do
       e -> Logger.warning("TRUNCATE checkpoint at terminate failed: #{inspect(e)}")
     end
 
-    # AD-17: final JSONL flush on orderly/trapped exit (bounded, atomic)
+    # final JSONL flush on orderly/trapped exit (bounded, atomic)
     # On brutal kill this does NOT run; the window is lost but recoverable
     # by re-export since JSONL is derived (Story 3.3 shutdown invariant).
     if state[:export_timer] do
@@ -809,7 +835,7 @@ defmodule Bee.Repo do
   end
 
   # A SQLite FOREIGN KEY violation on a write that references an issue means the
-  # target issue no longer exists (GC-3353: comment/lock against a deleted
+  # target issue no longer exists (a comment/lock against a deleted
   # issue). Translate that raw driver error into a structured `:not_found` so
   # callers get a clean not-found instead of a crashed GenServer. Structured
   # atoms (`:already_locked`, `:cycle`) and any other reason pass through.

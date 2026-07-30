@@ -83,7 +83,7 @@ defmodule Bee.Store.Migrate do
     ],
     "id_counter" => [{"prefix", "TEXT", 0, nil, 1}, {"next_id", "INTEGER", 1, "1", 0}]
   }
-  @gc_daemon_objects ~w(
+  @legacy_extended_objects ~w(
     labels issue_project_backfill_log issues_fts issues_fts_ai issues_fts_ad issues_fts_au
   )
 
@@ -121,7 +121,7 @@ defmodule Bee.Store.Migrate do
   def migration_006, do: {7, :add_measure_domains, &add_measure_domains/1}
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
-          {:ok, :fresh | :devman | :gc_daemon} | {:error, :unknown_baseline}
+          {:ok, :fresh | :legacy_base | :legacy_extended} | {:error, :unknown_baseline}
   def detect_baseline(conn) do
     case user_table_names(conn) do
       [] ->
@@ -130,7 +130,7 @@ defmodule Bee.Store.Migrate do
       _tables ->
         with :ok <- validate_core_tables(conn),
              {:ok, project_columns} <- project_column_names(conn),
-             {:ok, support_state} <- gc_daemon_support_state(conn) do
+             {:ok, support_state} <- legacy_extended_object_state(conn) do
           detect_populated_baseline(project_columns, support_state)
         else
           _ -> {:error, :unknown_baseline}
@@ -382,13 +382,13 @@ defmodule Bee.Store.Migrate do
     end
   end
 
-  # --- Migration 002: issues.metadata (AD-14) ---
+  # --- Migration 002: issues.metadata ---
 
   defp add_issues_metadata(conn) do
     execute(conn, "ALTER TABLE issues ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
   end
 
-  # --- Migration 003: events, measurements, intents, measures, intent_usage (AD-7, AD-9, AD-5, AD-20) ---
+  # --- Migration 003: events, measurements, intents, measures, intent_usage ---
 
   defp add_events_measurements_intents(conn) do
     statements = [
@@ -454,7 +454,7 @@ defmodule Bee.Store.Migrate do
     end
   end
 
-  # --- Migration 004: dependencies PK rebuild (AD-16) ---
+  # --- Migration 004: dependencies PK rebuild ---
 
   defp rebuild_dependencies_pk(conn) do
     statements = [
@@ -485,7 +485,7 @@ defmodule Bee.Store.Migrate do
     end
   end
 
-  # --- Migration 005: event type and canonical JSON payload (AD-7, AD-8) ---
+  # --- Migration 005: event type and canonical JSON payload ---
 
   defp add_event_envelope(conn) do
     statements = [
@@ -525,8 +525,8 @@ defmodule Bee.Store.Migrate do
   end
 
   defp prepare_baseline(conn, :fresh), do: create_fresh_core_schema(conn)
-  defp prepare_baseline(_conn, :devman), do: :ok
-  defp prepare_baseline(_conn, :gc_daemon), do: :ok
+  defp prepare_baseline(_conn, :legacy_base), do: :ok
+  defp prepare_baseline(_conn, :legacy_extended), do: :ok
 
   defp rebuild_projects(conn, baseline) do
     with {:ok, projects} <- read_projects(conn, baseline),
@@ -633,13 +633,13 @@ defmodule Bee.Store.Migrate do
 
   defp read_projects(_conn, :fresh), do: {:ok, []}
 
-  defp read_projects(conn, :devman) do
-    project_rows(conn, @base_project_columns, &normalize_devman_project/1)
+  defp read_projects(conn, :legacy_base) do
+    project_rows(conn, @base_project_columns, &normalize_legacy_base_project/1)
   end
 
-  defp read_projects(conn, :gc_daemon) do
+  defp read_projects(conn, :legacy_extended) do
     columns = @base_project_columns ++ @adopted_project_columns ++ @folded_project_columns
-    project_rows(conn, columns, &normalize_gc_daemon_project/1)
+    project_rows(conn, columns, &normalize_legacy_extended_project/1)
   end
 
   defp project_rows(conn, columns, normalize) do
@@ -677,18 +677,18 @@ defmodule Bee.Store.Migrate do
     end
   end
 
-  defp normalize_devman_project(project) do
+  defp normalize_legacy_base_project(project) do
     project
     |> Map.merge(Map.new(@adopted_project_columns, fn column -> {column, nil} end))
     |> Map.put("source", "manual")
     |> Map.put("metadata", "{}")
   end
 
-  defp normalize_gc_daemon_project(project) do
+  defp normalize_legacy_extended_project(project) do
     metadata =
       @folded_project_columns
       |> Map.new(fn column -> {column, decode_json_or_preserve(Map.get(project, column))} end)
-      |> then(&%{"gc_daemon" => &1})
+      |> then(&%{"legacy_extended" => &1})
       |> Jason.encode!()
 
     project
@@ -720,7 +720,7 @@ defmodule Bee.Store.Migrate do
     end)
   end
 
-  defp create_baseline_support_objects(_conn, :gc_daemon), do: :ok
+  defp create_baseline_support_objects(_conn, :legacy_extended), do: :ok
 
   defp create_baseline_support_objects(conn, _baseline) do
     statements = [
@@ -843,12 +843,12 @@ defmodule Bee.Store.Migrate do
   defp maybe_disable_foreign_keys(_conn, false), do: :ok
   defp maybe_disable_foreign_keys(conn, true), do: execute(conn, "PRAGMA foreign_keys=OFF")
 
-  defp detect_populated_baseline(@base_project_columns, :absent), do: {:ok, :devman}
+  defp detect_populated_baseline(@base_project_columns, :absent), do: {:ok, :legacy_base}
 
   defp detect_populated_baseline(project_columns, :present) do
     if Enum.sort(project_columns) ==
          Enum.sort(@base_project_columns ++ @adopted_project_columns ++ @folded_project_columns) do
-      {:ok, :gc_daemon}
+      {:ok, :legacy_extended}
     else
       {:error, :unknown_baseline}
     end
@@ -948,11 +948,11 @@ defmodule Bee.Store.Migrate do
     end
   end
 
-  defp gc_daemon_support_state(conn) do
-    if Enum.all?(@gc_daemon_objects, &object_exists?(conn, &1)) do
+  defp legacy_extended_object_state(conn) do
+    if Enum.all?(@legacy_extended_objects, &object_exists?(conn, &1)) do
       {:ok, :present}
     else
-      if Enum.all?(@gc_daemon_objects, &(not object_exists?(conn, &1))) do
+      if Enum.all?(@legacy_extended_objects, &(not object_exists?(conn, &1))) do
         {:ok, :absent}
       else
         {:error, :unknown_baseline}

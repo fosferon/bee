@@ -209,10 +209,10 @@ defmodule Bee.Store.MigrateTest do
     assert table_exists?(conn, "issue_project_backfill_log")
   end
 
-  test "normalises the DevMan baseline to the canonical baseline projects schema", %{conn: conn} do
+  test "normalises the legacy base baseline to the canonical baseline projects schema", %{conn: conn} do
     :ok = Bee.Store.init_schema(conn)
 
-    assert {:ok, :devman} = Migrate.detect_baseline(conn)
+    assert {:ok, :legacy_base} = Migrate.detect_baseline(conn)
     assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000()])
 
     assert {:ok, 1} = Migrate.user_version(conn)
@@ -222,12 +222,12 @@ defmodule Bee.Store.MigrateTest do
     assert table_exists?(conn, "issue_project_backfill_log")
   end
 
-  test "normalises the gc_daemon baseline and folds legacy project data into metadata", %{
+  test "normalises the legacy_extended baseline and folds legacy project data into metadata", %{
     conn: conn
   } do
-    create_gc_daemon_baseline(conn)
+    create_legacy_extended_baseline(conn)
 
-    assert {:ok, :gc_daemon} = Migrate.detect_baseline(conn)
+    assert {:ok, :legacy_extended} = Migrate.detect_baseline(conn)
     assert :ok = Migrate.run(conn, migrations: [Migrate.migration_000()])
 
     assert {:ok, 1} = Migrate.user_version(conn)
@@ -237,7 +237,7 @@ defmodule Bee.Store.MigrateTest do
              project_adopted_values(conn, "bee")
 
     assert %{
-             "gc_daemon" => %{
+             "legacy_extended" => %{
                "branch" => "main",
                "ports_json" => %{"http" => 4242},
                "domains_json" => ["bee.example.test"],
@@ -542,7 +542,7 @@ defmodule Bee.Store.MigrateTest do
     end
   end
 
-  defp create_gc_daemon_baseline(conn) do
+  defp create_legacy_extended_baseline(conn) do
     :ok = Bee.Store.init_schema(conn)
 
     [

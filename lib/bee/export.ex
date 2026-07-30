@@ -80,7 +80,7 @@ defmodule Bee.Export do
         Jason.encode!(entry)
       end)
 
-    # AD-17: atomic write — temp file + rename, so a reader never sees
+    # atomic write — temp file + rename, so a reader never sees
     # a half-written trail (Story 3.4, FR16).
     path |> Path.dirname() |> File.mkdir_p!()
     tmp_path = path <> ".tmp"
@@ -104,7 +104,7 @@ defmodule Bee.Export do
             max(acc, num)
           end)
 
-        # AD-17: idempotent import via upsert — re-importing the same
+        # idempotent import via upsert — re-importing the same
         # trail changes nothing (Story 3.4, FR16).
         Enum.each(lines, fn data ->
           id = Map.get(data, "id")

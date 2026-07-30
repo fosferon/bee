@@ -70,7 +70,7 @@ defmodule Bee.Lock do
 
   @spec sweep_expired(Exqlite.Sqlite3.db()) :: integer()
   @doc """
-  Sweeps expired locks without emitting command events (AD-19).
+  Sweeps expired locks without emitting command events.
 
   Each release remains transactional. A released lock no longer matches the
   expired-and-held query, so a re-dispatch is a no-op.
@@ -113,7 +113,7 @@ defmodule Bee.Lock do
     end
   end
 
-  # Fail soft (GC-3353): surface constraint errors (e.g. a lock referencing a
+  # Fail soft: surface constraint errors (e.g. a lock referencing a
   # missing issue -> FOREIGN KEY violation) instead of a `{:badmatch}` that
   # crashed the owning `Bee.Repo` GenServer. Always release the statement.
   @spec run_sql(Exqlite.Sqlite3.db(), String.t(), list()) :: :ok | {:error, term()}
