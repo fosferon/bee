@@ -28,10 +28,16 @@ defmodule Bee.Intent.Registry do
   @spec remove(Exqlite.Sqlite3.db(), String.t()) :: :ok
   def remove(conn, name), do: Bee.Store.Intents.delete(conn, name)
 
+  @spec list(Exqlite.Sqlite3.db()) :: {:ok, [map()]} | {:error, term()}
+  def list(conn), do: Bee.Store.Intents.list(conn)
+
   defp encode_spec(spec) do
     %{
+      "text" => spec.text,
       "status" => spec.status,
       "project_id" => spec.project_id,
+      "project_ids" => spec.project_ids,
+      "ready" => spec.ready,
       "assigned_to" => spec.assigned_to,
       "labels" => spec.labels,
       "order_by" => Enum.map(spec.order_by, fn {field, direction} -> [field, direction] end),
@@ -49,8 +55,11 @@ defmodule Bee.Intent.Registry do
          {:ok, detail} <- decode_detail(Map.get(encoded, "detail", "compact")),
          {:ok, transforms} <- decode_transforms(Map.get(encoded, "transforms", %{})) do
       Spec.new(
+        text: Map.get(encoded, "text"),
         status: Map.get(encoded, "status"),
         project_id: Map.get(encoded, "project_id"),
+        project_ids: Map.get(encoded, "project_ids"),
+        ready: Map.get(encoded, "ready", false),
         assigned_to: Map.get(encoded, "assigned_to"),
         labels: Map.get(encoded, "labels"),
         order_by: order_by,

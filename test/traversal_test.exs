@@ -136,6 +136,30 @@ defmodule Bee.TraversalTest do
     assert {:ok, [1, 2, 3]} = Bee.critical_path(server)
   end
 
+  test "critical path can be rooted and project scoped", %{server: server} do
+    {:ok, _} = Bee.register_project("alpha", %{}, server)
+    {:ok, _} = Bee.register_project("beta", %{}, server)
+
+    for {title, project} <- [
+          {"alpha blocker", "alpha"},
+          {"alpha middle", "alpha"},
+          {"alpha goal", "alpha"},
+          {"beta blocker", "beta"},
+          {"beta goal", "beta"}
+        ] do
+      {:ok, _} = Bee.create(title, [project_id: project], server)
+    end
+
+    :ok = Bee.block(2, 1, server)
+    :ok = Bee.block(3, 2, server)
+    :ok = Bee.block(5, 4, server)
+
+    assert {:ok, [1, 2, 3]} = Bee.critical_path([root: 3], server)
+    assert {:ok, [1, 2, 3]} = Bee.critical_path([project_id: "alpha"], server)
+    assert {:ok, [4, 5]} = Bee.critical_path([project_id: "beta"], server)
+    assert {:ok, []} = Bee.critical_path([root: 3, project_id: "beta"], server)
+  end
+
   test "bottlenecks are derived from critical-path assignments", %{server: server} do
     {:ok, _} = Bee.register_project("bee", %{}, server)
     {:ok, _} = Bee.register_agent("alice", %{}, server)
@@ -153,5 +177,19 @@ defmodule Bee.TraversalTest do
              {"alice", 1, ["bee"]},
              {"bob", 1, ["bee"]}
            ]
+  end
+
+  test "registered projects and agents are discoverable", %{server: server} do
+    assert {:ok, _} = Bee.register_project("bee", %{name: "Bee"}, server)
+    assert {:ok, _} = Bee.register_agent("alice", %{name: "Alice"}, server)
+
+    assert {:ok, [project]} = Bee.list_projects(server)
+    assert project["id"] == "bee"
+    assert project["name"] == "Bee"
+    assert project["issue_count"] == 0
+
+    assert {:ok, [agent]} = Bee.list_agents(server)
+    assert agent["id"] == "alice"
+    assert agent["name"] == "Alice"
   end
 end

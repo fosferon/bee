@@ -38,6 +38,21 @@ defmodule Bee.Store.Measurements do
 
   def register(_conn, _name, _unit, _opts), do: {:error, :invalid_measure}
 
+  @spec list_registered(Exqlite.Sqlite3.db()) :: {:ok, [map()]}
+  def list_registered(conn) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT name, unit, domain, registered_at FROM measures ORDER BY name ASC"
+      )
+
+    try do
+      {:ok, collect_registered(conn, stmt)}
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
   defp domain(opts) do
     case Keyword.get(opts, :domain, :any) do
       domain when domain in [:any, :non_negative] -> {:ok, Atom.to_string(domain)}
@@ -150,6 +165,19 @@ defmodule Bee.Store.Measurements do
       end
     after
       Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp collect_registered(conn, stmt) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [name, unit, domain, registered_at]} ->
+        [
+          %{name: name, unit: unit, domain: domain, registered_at: registered_at}
+          | collect_registered(conn, stmt)
+        ]
+
+      :done ->
+        []
     end
   end
 

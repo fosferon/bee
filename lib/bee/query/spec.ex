@@ -6,8 +6,11 @@ defmodule Bee.Query.Spec do
   @include_relations [:comments, :labels]
   @details [:minimal, :compact, :standard, :full]
   @fields [
+    :text,
     :status,
     :project_id,
+    :project_ids,
+    :ready,
     :assigned_to,
     :labels,
     :order_by,
@@ -20,7 +23,10 @@ defmodule Bee.Query.Spec do
 
   @enforce_keys [:order_by]
   defstruct status: nil,
+            text: nil,
             project_id: nil,
+            project_ids: nil,
+            ready: false,
             assigned_to: nil,
             labels: nil,
             order_by: [created_at: :asc, id: :asc],
@@ -32,7 +38,10 @@ defmodule Bee.Query.Spec do
 
   @type t :: %__MODULE__{
           status: String.t() | nil,
+          text: String.t() | nil,
           project_id: String.t() | nil,
+          project_ids: [String.t()] | nil,
+          ready: boolean(),
           assigned_to: String.t() | nil,
           labels: String.t() | [String.t()] | nil,
           order_by: keyword(:asc | :desc),
@@ -72,8 +81,11 @@ defmodule Bee.Query.Spec do
   @spec to_opts(t()) :: keyword()
   def to_opts(%__MODULE__{} = spec) do
     [
+      text: spec.text,
       status: spec.status,
       project_id: spec.project_id,
+      project_ids: spec.project_ids,
+      ready: spec.ready,
       assigned_to: spec.assigned_to,
       labels: spec.labels,
       order_by: spec.order_by,
@@ -85,8 +97,11 @@ defmodule Bee.Query.Spec do
   end
 
   defp validate(spec) do
-    with :ok <- validate_filter(:status, spec.status),
+    with :ok <- validate_filter(:text, spec.text),
+         :ok <- validate_filter(:status, spec.status),
          :ok <- validate_filter(:project_id, spec.project_id),
+         :ok <- validate_project_ids(spec.project_ids),
+         :ok <- validate_ready(spec.ready),
          :ok <- validate_filter(:assigned_to, spec.assigned_to),
          :ok <- validate_labels(spec.labels),
          :ok <- validate_order_by(spec.order_by),
@@ -115,6 +130,20 @@ defmodule Bee.Query.Spec do
   defp validate_filter(_key, nil), do: :ok
   defp validate_filter(_key, value) when is_binary(value), do: :ok
   defp validate_filter(key, value), do: {:error, {:invalid_filter, key, value}}
+
+  defp validate_project_ids(nil), do: :ok
+
+  defp validate_project_ids(project_ids) when is_list(project_ids) and project_ids != [] do
+    if Enum.all?(project_ids, &is_binary/1),
+      do: :ok,
+      else: {:error, {:invalid_filter, :project_ids, project_ids}}
+  end
+
+  defp validate_project_ids(project_ids),
+    do: {:error, {:invalid_filter, :project_ids, project_ids}}
+
+  defp validate_ready(ready) when is_boolean(ready), do: :ok
+  defp validate_ready(ready), do: {:error, {:invalid_filter, :ready, ready}}
 
   defp validate_labels(nil), do: :ok
   defp validate_labels(label) when is_binary(label), do: :ok

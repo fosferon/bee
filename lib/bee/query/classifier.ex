@@ -5,8 +5,11 @@ defmodule Bee.Query.Classifier do
 
   @compute_reads [:who_blocks_whom, :agent_load, :bottlenecks]
   @field_lanes %{
+    text: :fast,
     status: :fast,
     project_id: :fast,
+    project_ids: :fast,
+    ready: :fast,
     assigned_to: :fast,
     labels: :fast,
     order_by: :fast,
@@ -23,7 +26,9 @@ defmodule Bee.Query.Classifier do
   end
 
   @spec classify(Bee.Query.Spec.t()) :: lane()
-  def classify(%Bee.Query.Spec{transforms: transforms}) when map_size(transforms) > 0, do: :compute
+  def classify(%Bee.Query.Spec{transforms: transforms}) when map_size(transforms) > 0,
+    do: :compute
+
   def classify(%Bee.Query.Spec{}), do: :fast
 
   @spec field_lanes() :: %{atom() => lane()}

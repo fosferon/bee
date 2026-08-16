@@ -251,6 +251,11 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call(:list_intents, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Intent.Registry.list/1)
+    {:reply, result, state}
+  end
+
   def handle_call({:register_measure, name, unit, opts}, _from, state) do
     result =
       transaction(state.conn, fn ->
@@ -290,6 +295,11 @@ defmodule Bee.Repo do
     end
   end
 
+  def handle_call(:list_measures, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Store.Measurements.list_registered/1)
+    {:reply, result, state}
+  end
+
   def handle_call({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
@@ -302,21 +312,17 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:ready, _opts}, _from, state) do
+  def handle_call({:ready, opts}, _from, state) do
     result =
-      read_with_pool(state, :fast, fn conn ->
-        issues =
-          conn
-          |> Bee.Graph.Ready.issue_ids()
-          |> Enum.flat_map(fn id ->
-            case Bee.Store.get_issue(conn, id) do
-              {:ok, issue} -> [issue]
-              _ -> []
-            end
-          end)
-
-        {:ok, issues}
-      end)
+      with {:ok, spec} <-
+             opts
+             |> Keyword.put_new(:order_by, id: :asc)
+             |> Keyword.put(:ready, true)
+             |> Bee.Query.Spec.new() do
+        read_with_pool(state, :fast, fn conn ->
+          Bee.Store.list_issues(conn, Bee.Query.Spec.to_opts(spec))
+        end)
+      end
 
     {:reply, result, state}
   end
@@ -533,6 +539,16 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call(:list_projects, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Agents.list_projects/1)
+    {:reply, result, state}
+  end
+
+  def handle_call(:list_agents, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Agents.list_agents/1)
+    {:reply, result, state}
+  end
+
   def handle_call({:assign, issue_id, agent_id}, _from, state) do
     full = resolve_id(issue_id, state.prefix)
 
@@ -590,6 +606,27 @@ defmodule Bee.Repo do
 
     {:reply, result, state}
   end
+
+  def handle_call({:critical_path, opts}, _from, state) when is_list(opts) do
+    opts =
+      case Keyword.get(opts, :root) do
+        nil -> opts
+        root -> Keyword.put(opts, :root, resolve_id(root, state.prefix))
+      end
+
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        case Bee.Store.Deps.critical_path(conn, opts) do
+          {:ok, path} -> {:ok, Enum.map(path, &Bee.Id.parse!/1)}
+          {:error, _reason} = error -> error
+        end
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:critical_path, _opts}, _from, state),
+    do: {:reply, {:error, :invalid_spec}, state}
 
   def handle_call({:rollup, id, opts}, _from, state) do
     full = resolve_id(id, state.prefix)

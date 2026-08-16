@@ -109,6 +109,22 @@ bee resolves the prefix for you.
 Four detail levels shape each result — `:minimal | :compact | :standard | :full` — so a
 list view doesn't pay for full descriptions, and a detail view can.
 
+Queries also compose plain-text search, multiple projects, dependency readiness, and
+recency ordering in one database operation:
+
+```elixir
+{:ok, %{issues: recent_track_work}} =
+  Bee.query(
+    text: "FameLine",
+    project_ids: ["api", "web"],
+    status: nil,
+    ready: true,
+    order_by: [updated_at: :desc],
+    limit: 10,
+    detail: :minimal
+  )
+```
+
 ### Ask in your own words
 
 ```elixir
@@ -119,6 +135,10 @@ list view doesn't pay for full descriptions, and a detail view can.
 # Register your own — a named, stored query spec
 :ok = Bee.register_intent("stale-and-open", status: "open", order_by: [created_at: :asc])
 {:ok, %{issues: stale}} = Bee.ask("stale-and-open")
+
+# Discover stored vocabulary instead of guessing it
+{:ok, intents} = Bee.list_intents()
+{:ok, measures} = Bee.list_measures()
 ```
 
 ### Measure, then roll up effort
@@ -167,6 +187,10 @@ honours the direction you ask for:
 ```elixir
 {:ok, blockers} = Bee.traverse(id, direction: :blockers)    # why is this gated?
 {:ok, dependents} = Bee.traverse(id, direction: :dependents) # what does this gate?
+
+# A bounded blocker-to-goal chain, or a project-scoped global path
+{:ok, chain} = Bee.critical_path(root: id, depth: 30)
+{:ok, project_path} = Bee.critical_path(project_id: "api", status: "open")
 ```
 
 ### The allocation tree
@@ -178,6 +202,9 @@ Alongside the dependency DAG, bee tracks **who works on what**:
 :ok = Bee.register_agent("mercury", name: "Mercury", type: "worker")
 :ok = Bee.join_project("mercury", "api")
 :ok = Bee.assign(auth.id, "mercury")
+
+{:ok, projects} = Bee.list_projects()          # includes issue_count
+{:ok, agents} = Bee.list_agents()
 
 {:ok, load} = Bee.agent_load("mercury")          # how many open issues?
 {:ok, pairs} = Bee.who_blocks_whom()              # which agents gate each other?

@@ -68,10 +68,16 @@ defmodule Bee.Query.Projection do
         {:comments, if(:comments in spec.include, do: issue.comments, else: :not_loaded)}
 
       :labels ->
-        {:labels, if(:labels in spec.include, do: issue.labels, else: :not_loaded)}
+        {:labels, issue.labels}
+
+      :blocked_by ->
+        {:blocked_by, issue.blocked_by}
+
+      relation when spec.detail == :minimal ->
+        {relation, :not_loaded}
 
       relation ->
-        {relation, :not_loaded}
+        {relation, Map.fetch!(issue, relation)}
     end)
   end
 end

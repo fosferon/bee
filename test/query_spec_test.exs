@@ -30,7 +30,7 @@ defmodule Bee.QuerySpecTest do
     {:ok, closed} = Bee.create("Closed", [priority: 2], server)
     :ok = Bee.update(closed.id, %{status: "closed"}, server)
 
-    assert {:ok, %{issues: [issue], withheld: %{relation_omitted: [:comments, :labels]}}} =
+    assert {:ok, %{issues: [issue], withheld: %{relation_omitted: [:comments]}}} =
              Bee.query([status: "open", order_by: [priority: :desc]], server)
 
     assert issue.title == "Open"
@@ -42,8 +42,8 @@ defmodule Bee.QuerySpecTest do
     assert {:ok,
             %{
               issues: issues,
-              withheld: %{limit: 2, relation_omitted: [:labels]},
-              refine: [include: [:comments, :labels], limit: nil]
+              withheld: %{limit: 2},
+              refine: [limit: nil]
             }} =
              Bee.query([limit: 1, include: [:comments]], server)
 
@@ -59,6 +59,80 @@ defmodule Bee.QuerySpecTest do
 
     assert Enum.map(first, & &1.id) == [1, 2]
     assert first == second
+  end
+
+  test "query combines plain-text FTS, multiple projects, recency, and minimal detail", %{
+    server: server
+  } do
+    {:ok, _} = Bee.register_project("mobus", %{}, server)
+    {:ok, _} = Bee.register_project("mobus_umbrella", %{}, server)
+    {:ok, _} = Bee.register_project("other", %{}, server)
+
+    {:ok, first} = Bee.create("FameLine foundation", [project_id: "mobus"], server)
+    {:ok, second} = Bee.create("FameLine cutover", [project_id: "mobus_umbrella"], server)
+    {:ok, _} = Bee.create("FameLine unrelated", [project_id: "other"], server)
+    {:ok, _} = Bee.create("Different track", [project_id: "mobus"], server)
+
+    assert {:ok, %{issues: issues}} =
+             Bee.query(
+               [
+                 text: "FameLine /",
+                 project_ids: ["mobus", "mobus_umbrella"],
+                 order_by: [id: :desc],
+                 detail: :minimal
+               ],
+               server
+             )
+
+    assert issues == [
+             %{
+               id: second.id,
+               title: "FameLine cutover",
+               comments: :not_loaded,
+               labels: [],
+               blocked_by: [],
+               blocks: :not_loaded,
+               lock: :not_loaded
+             },
+             %{
+               id: first.id,
+               title: "FameLine foundation",
+               comments: :not_loaded,
+               labels: [],
+               blocked_by: [],
+               blocks: :not_loaded,
+               lock: :not_loaded
+             }
+           ]
+
+    :ok = Bee.block(second.id, first.id, server)
+
+    assert {:ok, %{issues: [%{id: ready_id}]}} =
+             Bee.query(
+               [
+                 text: "FameLine",
+                 project_ids: ["mobus", "mobus_umbrella"],
+                 ready: true,
+                 detail: :minimal
+               ],
+               server
+             )
+
+    assert ready_id == first.id
+  end
+
+  test "ready honours query filters and pagination inside Bee", %{server: server} do
+    {:ok, _} = Bee.register_project("one", %{}, server)
+    {:ok, _} = Bee.register_project("two", %{}, server)
+    {:ok, first} = Bee.create("First", [project_id: "one", priority: 1], server)
+    {:ok, _} = Bee.create("Second", [project_id: "one", priority: 2], server)
+    {:ok, _} = Bee.create("Other", [project_id: "two", priority: 3], server)
+    :ok = Bee.block(2, first.id, server)
+
+    assert {:ok, [%{id: id}]} =
+             Bee.ready([project_id: "one", order_by: [priority: :desc], limit: 1], server)
+
+    assert id == first.id
   end
 
   test "structural spec failures raise from the facade but return from the message boundary", %{
@@ -99,6 +173,23 @@ defmodule Bee.QuerySpecTest do
     assert {:ok, %{issues: [%{title: "Bob"}]}} = Bee.ask("bob_open", [], server)
     assert :ok = Bee.remove_intent("bob_open", server)
     assert {:error, :unknown_intent} = Bee.ask("bob_open", [], server)
+  end
+
+  test "registered intents and measures are discoverable", %{server: server} do
+    assert :ok = Bee.register_intent("recent", [order_by: [updated_at: :desc], limit: 5], server)
+    assert :ok = Bee.register_measure("tokens", "token", [domain: :non_negative], server)
+
+    assert {:ok, [%{name: "recent", spec: %{"limit" => 5}, usage_count: 0}]} =
+             Bee.list_intents(server)
+
+    assert {:ok, measures} = Bee.list_measures(server)
+
+    assert Enum.any?(
+             measures,
+             &match?(%{name: "tokens", unit: "token", domain: "non_negative"}, &1)
+           )
+
+    assert Enum.any?(measures, &(&1.name == "effort" and &1.unit == "minutes"))
   end
 
   test "successful intents record usage asynchronously", %{server: server} do

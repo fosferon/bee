@@ -1009,6 +1009,59 @@ defmodule Bee.Store do
         end
       end)
 
+    {clauses, params} =
+      case Keyword.get(opts, :project_ids) do
+        nil ->
+          {clauses, params}
+
+        project_ids when is_list(project_ids) and project_ids != [] ->
+          placeholders = Enum.map_join(project_ids, ", ", fn _ -> "?" end)
+          {["project_id IN (#{placeholders})" | clauses], Enum.reverse(project_ids) ++ params}
+
+        _ ->
+          {clauses, params}
+      end
+
+    {clauses, params} =
+      case Keyword.get(opts, :text) do
+        nil ->
+          {clauses, params}
+
+        text when is_binary(text) and text != "" ->
+          case plain_text_fts_query(text) do
+            nil ->
+              {["0 = 1" | clauses], params}
+
+            fts_query ->
+              clause = "issues.id IN (SELECT issue_id FROM issues_fts WHERE issues_fts MATCH ?)"
+              {[clause | clauses], [fts_query | params]}
+          end
+
+        _ ->
+          {clauses, params}
+      end
+
+    {clauses, params} =
+      if Keyword.get(opts, :ready, false) do
+        types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)
+        placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+
+        ready_clause = """
+        issues.status = 'open' AND NOT EXISTS (
+          SELECT 1
+          FROM dependencies ready_dep
+          INNER JOIN issues ready_blocker ON ready_blocker.id = ready_dep.depends_on_id
+          WHERE ready_dep.issue_id = issues.id
+            AND ready_dep.dep_type IN (#{placeholders})
+            AND ready_blocker.status NOT IN ('closed', 'cancelled')
+        )
+        """
+
+        {[ready_clause | clauses], Enum.reverse(types) ++ params}
+      else
+        {clauses, params}
+      end
+
     # Label filtering via EXISTS subquery on issue_labels junction table.
     # Accepts a single label string or a list (AND — issue must have ALL).
     {clauses, params} =
@@ -1042,4 +1095,13 @@ defmodule Bee.Store do
   end
 
   defp now_iso, do: DateTime.utc_now() |> DateTime.to_iso8601()
+
+  defp plain_text_fts_query(text) do
+    terms = Regex.scan(~r/[\p{L}\p{N}_]+/u, text) |> List.flatten()
+
+    case terms do
+      [] -> nil
+      _ -> Enum.map_join(terms, " AND ", &~s("#{String.replace(&1, "\"", "\"\"")}"))
+    end
+  end
 end

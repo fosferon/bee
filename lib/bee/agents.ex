@@ -60,7 +60,17 @@ defmodule Bee.Agents do
 
   @spec list_projects(Exqlite.Sqlite3.db()) :: {:ok, [map()]}
   def list_projects(conn) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT * FROM projects ORDER BY name")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        """
+        SELECT projects.*,
+               (SELECT COUNT(*) FROM issues WHERE issues.project_id = projects.id) AS issue_count
+        FROM projects
+        ORDER BY projects.name
+        """
+      )
+
     rows = Bee.Store.collect_rows(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
     {:ok, Enum.map(rows, fn {cols, row} -> row_to_map(cols, row) end)}

@@ -3,7 +3,7 @@ defmodule Bee.Query.Withheld do
 
   alias Bee.Query.Spec
 
-  @relations [:comments, :labels]
+  @relations [:comments]
 
   @spec build(Exqlite.Sqlite3.db(), Spec.t(), [map()]) :: {map(), keyword()}
   def build(conn, %Spec{} = spec, issues) do

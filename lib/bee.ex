@@ -82,9 +82,10 @@ defmodule Bee do
   `{:ok, %{issues: [...], withheld: map, refine: keyword}}`.
 
   `withheld` reports omissions (a truncated `limit`, omitted relations) and `refine`
-  suggests how to ask for what was held back. Filter by `:status`, `:project_id`,
-  `:assigned_to`, `:labels`; sort with `:order_by`; page with `:limit` / `:offset`;
-  load relations with `:include`; and shape each result with `:detail`
+  suggests how to ask for what was held back. Filter by plain-text `:text`, `:status`,
+  one `:project_id` or any of `:project_ids`, `:ready`, `:assigned_to`, and `:labels`;
+  sort with `:order_by`; page with `:limit` / `:offset`; load relations with `:include`;
+  and shape each result with `:detail`
   (`:minimal | :compact | :standard | :full`).
   """
   def query(spec, server \\ @default_server) do
@@ -124,6 +125,8 @@ defmodule Bee do
   def remove_intent(name, server \\ @default_server),
     do: GenServer.call(server, {:remove_intent, name})
 
+  def list_intents(server \\ @default_server), do: GenServer.call(server, :list_intents)
+
   @doc """
   Registers a numeric measure (e.g. `"effort"`, `"tokens"`) with a unit and an
   optional value `:domain` (`:any` or `:non_negative`). Required before `measure/3`.
@@ -147,6 +150,8 @@ defmodule Bee do
   """
   def measure(id, attrs, server \\ @default_server),
     do: GenServer.call(server, {:measure, id, attrs})
+
+  def list_measures(server \\ @default_server), do: GenServer.call(server, :list_measures)
 
   def tree_page(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
@@ -214,10 +219,18 @@ defmodule Bee do
     do: GenServer.call(server, {:candidates, id})
 
   @doc """
-  Returns `{:ok, [ids]}` — the longest weighted path through the gating DAG,
-  computed with a memoized topsort rather than exponential recursion.
+  Returns `{:ok, [ids]}` — the longest dependency path through the gating DAG,
+  computed with a memoized topsort rather than exponential recursion. Pass `:root`
+  for the blocker-to-goal chain ending at one issue, or scope the global path with
+  `:project_id` and/or `:status`. `:types` selects dependency types and `:depth`
+  bounds rooted traversal (maximum 100).
   """
-  def critical_path(server \\ @default_server), do: GenServer.call(server, :critical_path)
+  def critical_path(), do: GenServer.call(@default_server, :critical_path)
+  def critical_path(opts) when is_list(opts), do: critical_path(opts, @default_server)
+  def critical_path(server), do: GenServer.call(server, :critical_path)
+
+  def critical_path(opts, server) when is_list(opts),
+    do: GenServer.call(server, {:critical_path, opts})
 
   @doc """
   Aggregates effort (`measure: "effort"`) over a scope rooted at `id`.
@@ -249,6 +262,9 @@ defmodule Bee do
 
   def register_agent(id, attrs \\ %{}, server \\ @default_server),
     do: GenServer.call(server, {:register_agent, id, attrs})
+
+  def list_projects(server \\ @default_server), do: GenServer.call(server, :list_projects)
+  def list_agents(server \\ @default_server), do: GenServer.call(server, :list_agents)
 
   def assign(issue_id, agent_id, server \\ @default_server),
     do: GenServer.call(server, {:assign, issue_id, agent_id})

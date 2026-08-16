@@ -30,6 +30,26 @@ defmodule Bee.Store.Intents do
   @spec delete(Exqlite.Sqlite3.db(), String.t()) :: :ok
   def delete(conn, name), do: execute(conn, "DELETE FROM intents WHERE name = ?", [name])
 
+  @spec list(Exqlite.Sqlite3.db()) :: {:ok, [map()]} | {:error, term()}
+  def list(conn) do
+    sql = """
+    SELECT intents.name, intents.spec_json, intents.created_at,
+           COALESCE(intent_usage.count, 0), intent_usage.last_used_at
+    FROM intents
+    LEFT JOIN intent_usage
+      ON intent_usage.name = intents.name AND intent_usage.kind = 'registered'
+    ORDER BY intents.name ASC
+    """
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+
+    try do
+      {:ok, collect_intents(conn, stmt)}
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
   @spec record_usage(Exqlite.Sqlite3.db(), String.t(), String.t()) :: :ok | {:error, term()}
   def record_usage(conn, name, kind) do
     sql = """
@@ -54,6 +74,25 @@ defmodule Bee.Store.Intents do
       end
     after
       Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp collect_intents(conn, stmt) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [name, spec_json, created_at, usage_count, last_used_at]} ->
+        [
+          %{
+            name: name,
+            spec: Jason.decode!(spec_json),
+            created_at: created_at,
+            usage_count: usage_count,
+            last_used_at: last_used_at
+          }
+          | collect_intents(conn, stmt)
+        ]
+
+      :done ->
+        []
     end
   end
 end
