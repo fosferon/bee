@@ -37,7 +37,10 @@ defmodule Bee.Query.Candidates do
   defp collect(conn, stmt) do
     case Exqlite.Sqlite3.step(conn, stmt) do
       {:row, [id, reason, confidence]} ->
-        [%{issue_id: Bee.Id.parse!(id), reason: reason, confidence: confidence} | collect(conn, stmt)]
+        [
+          %{issue_id: Bee.Id.parse!(id), reason: reason, confidence: confidence}
+          | collect(conn, stmt)
+        ]
 
       :done ->
         []

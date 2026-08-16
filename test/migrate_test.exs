@@ -209,7 +209,9 @@ defmodule Bee.Store.MigrateTest do
     assert table_exists?(conn, "issue_project_backfill_log")
   end
 
-  test "normalises the legacy base baseline to the canonical baseline projects schema", %{conn: conn} do
+  test "normalises the legacy base baseline to the canonical baseline projects schema", %{
+    conn: conn
+  } do
     :ok = Bee.Store.init_schema(conn)
 
     assert {:ok, :legacy_base} = Migrate.detect_baseline(conn)

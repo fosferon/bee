@@ -9,6 +9,7 @@ defmodule Bee.Query.Interpreter do
   def execute(conn, %Spec{} = spec) do
     with {:ok, issues} <- Bee.Store.list_issues(conn, Spec.to_opts(spec)) do
       {withheld, refine} = Bee.Query.Withheld.build(conn, spec, issues)
+
       {issues, transformed} =
         issues
         |> Bee.Query.Projection.project(spec)
@@ -16,7 +17,10 @@ defmodule Bee.Query.Interpreter do
         |> Enum.unzip()
 
       transformed = Enum.reject(transformed, &(&1 == %{}))
-      withheld = if transformed == [], do: withheld, else: Map.put(withheld, :transformed, transformed)
+
+      withheld =
+        if transformed == [], do: withheld, else: Map.put(withheld, :transformed, transformed)
+
       refine = if transformed == [], do: refine, else: refine ++ [transforms: %{}]
 
       {:ok, %{issues: issues, withheld: withheld, refine: refine}}

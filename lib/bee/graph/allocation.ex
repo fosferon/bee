@@ -77,7 +77,9 @@ defmodule Bee.Graph.Allocation do
   end
 
   defp agent_projects(conn, agent_id) do
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, "SELECT project_id FROM project_agents WHERE agent_id = ?")
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(conn, "SELECT project_id FROM project_agents WHERE agent_id = ?")
+
     :ok = Exqlite.Sqlite3.bind(stmt, [agent_id])
 
     try do

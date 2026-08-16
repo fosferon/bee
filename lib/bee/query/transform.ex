@@ -23,8 +23,11 @@ defmodule Bee.Query.Transform do
   def apply(issue, transforms) do
     Enum.reduce(transforms, {issue, %{}}, fn {field, transform}, {issue, applied} ->
       case apply_one(Map.get(issue, field), transform) do
-        {:ok, value, descriptor} -> {Map.put(issue, field, value), Map.put(applied, field, descriptor)}
-        :error -> {issue, applied}
+        {:ok, value, descriptor} ->
+          {Map.put(issue, field, value), Map.put(applied, field, descriptor)}
+
+        :error ->
+          {issue, applied}
       end
     end)
   end
