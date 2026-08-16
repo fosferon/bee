@@ -103,13 +103,14 @@ bee resolves the prefix for you.
   Bee.query(status: "open", project_id: "api", limit: 5, detail: :compact)
 
 # withheld => %{limit: 42}            # 42 more issues exist beyond the limit
-# refine  => [limit: nil]             # ask again like this to see them all
+# refine  => [offset: 5]              # request the next bounded page
 ```
 
 Four detail levels shape each result — `:minimal | :compact | :standard | :full` — so a
 list view doesn't pay for full descriptions, and a detail view can.
 
-Queries also compose plain-text search, multiple projects, dependency readiness, and
+Query limits are capped at 500; page with `offset` instead of requesting an unbounded
+result. Queries also compose plain-text search, multiple projects, dependency readiness, and
 recency ordering in one database operation:
 
 ```elixir

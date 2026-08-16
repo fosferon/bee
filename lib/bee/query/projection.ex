@@ -2,7 +2,7 @@ defmodule Bee.Query.Projection do
   @moduledoc false
 
   @presets %{
-    minimal: [:id, :title],
+    minimal: [:id, :title, :status, :priority],
     compact: [
       :id,
       :title,
@@ -49,8 +49,6 @@ defmodule Bee.Query.Projection do
     ]
   }
 
-  @relations [:labels, :blocked_by, :blocks, :comments, :lock]
-
   @spec project([map()], Bee.Query.Spec.t()) :: [map()]
   def project(issues, spec), do: Enum.map(issues, &project_issue(&1, spec))
 
@@ -63,21 +61,22 @@ defmodule Bee.Query.Projection do
   end
 
   defp relations(issue, spec) do
-    Map.new(@relations, fn
-      :comments ->
-        {:comments, if(:comments in spec.include, do: issue.comments, else: :not_loaded)}
+    %{labels: issue.labels, blocked_by: issue.blocked_by}
+    |> maybe_put_comments(issue, spec)
+    |> maybe_put_coordination_relations(issue, spec)
+  end
 
-      :labels ->
-        {:labels, issue.labels}
+  defp maybe_put_comments(relations, issue, spec) do
+    if :comments in spec.include,
+      do: Map.put(relations, :comments, issue.comments),
+      else: relations
+  end
 
-      :blocked_by ->
-        {:blocked_by, issue.blocked_by}
+  defp maybe_put_coordination_relations(relations, _issue, %{detail: :minimal}), do: relations
 
-      relation when spec.detail == :minimal ->
-        {relation, :not_loaded}
-
-      relation ->
-        {relation, Map.fetch!(issue, relation)}
-    end)
+  defp maybe_put_coordination_relations(relations, issue, _spec) do
+    relations
+    |> Map.put(:blocks, issue.blocks)
+    |> Map.put(:lock, issue.lock)
   end
 end

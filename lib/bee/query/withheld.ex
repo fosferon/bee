@@ -8,10 +8,18 @@ defmodule Bee.Query.Withheld do
   @spec build(Exqlite.Sqlite3.db(), Spec.t(), [map()]) :: {map(), keyword()}
   def build(conn, %Spec{} = spec, issues) do
     {withheld, refine} = relation_omissions(spec)
+    {detail_withheld, detail_refine} = detail_omissions(spec)
     {limit_withheld, limit_refine} = limit_truncation(conn, spec, issues)
 
-    {Map.merge(withheld, limit_withheld), refine ++ limit_refine}
+    {withheld |> Map.merge(detail_withheld) |> Map.merge(limit_withheld),
+     refine ++ detail_refine ++ limit_refine}
   end
+
+  defp detail_omissions(%Spec{detail: :minimal}) do
+    {%{detail_omitted: [:blocks, :lock]}, [detail: :compact]}
+  end
+
+  defp detail_omissions(_spec), do: {%{}, []}
 
   defp relation_omissions(spec) do
     omitted = @relations -- spec.include
@@ -32,6 +40,8 @@ defmodule Bee.Query.Withheld do
     offset = spec.offset || 0
     omitted = max(total - offset - length(issues), 0)
 
-    if omitted > 0, do: {%{limit: omitted}, [limit: nil]}, else: {%{}, []}
+    if omitted > 0,
+      do: {%{limit: omitted}, [offset: offset + length(issues)]},
+      else: {%{}, []}
   end
 end

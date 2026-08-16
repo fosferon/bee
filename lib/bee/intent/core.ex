@@ -14,6 +14,7 @@ defmodule Bee.Intent.Core do
       spec =
         [
           status: "open",
+          ready: true,
           assigned_to: Keyword.get(opts, :agent),
           project_id: Keyword.get(opts, :project),
           limit: Keyword.get(opts, :limit),

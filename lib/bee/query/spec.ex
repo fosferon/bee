@@ -171,7 +171,7 @@ defmodule Bee.Query.Spec do
   defp validate_order_by(value), do: {:error, {:invalid_order_by, value}}
 
   defp validate_limit(nil), do: :ok
-  defp validate_limit(limit) when is_integer(limit) and limit > 0, do: :ok
+  defp validate_limit(limit) when is_integer(limit) and limit > 0 and limit <= 500, do: :ok
   defp validate_limit(limit), do: {:error, {:invalid_limit, limit}}
 
   defp validate_offset(nil), do: :ok

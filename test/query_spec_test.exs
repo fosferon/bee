@@ -43,7 +43,7 @@ defmodule Bee.QuerySpecTest do
             %{
               issues: issues,
               withheld: %{limit: 2},
-              refine: [limit: nil]
+              refine: [offset: 1]
             }} =
              Bee.query([limit: 1, include: [:comments]], server)
 
@@ -88,20 +88,18 @@ defmodule Bee.QuerySpecTest do
              %{
                id: second.id,
                title: "FameLine cutover",
-               comments: :not_loaded,
+               status: "open",
+               priority: nil,
                labels: [],
-               blocked_by: [],
-               blocks: :not_loaded,
-               lock: :not_loaded
+               blocked_by: []
              },
              %{
                id: first.id,
                title: "FameLine foundation",
-               comments: :not_loaded,
+               status: "open",
+               priority: nil,
                labels: [],
-               blocked_by: [],
-               blocks: :not_loaded,
-               lock: :not_loaded
+               blocked_by: []
              }
            ]
 
@@ -148,6 +146,12 @@ defmodule Bee.QuerySpecTest do
              GenServer.call(server, {:query, [sql: "DROP TABLE issues"]})
 
     assert Process.alive?(pid)
+  end
+
+  test "query rejects a limit above the bounded public maximum", %{server: server} do
+    assert_raise ArgumentError, ~r/invalid limit/, fn ->
+      Bee.query([limit: 501], server)
+    end
   end
 
   test "classifier accepts validated query specs", %{server: server} do
@@ -205,6 +209,15 @@ defmodule Bee.QuerySpecTest do
     :ok = Exqlite.Sqlite3.bind(stmt, ["what_next", "core"])
     assert {:row, [1]} = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
+  end
+
+  test "what_next excludes work with an outstanding gating dependency", %{server: server} do
+    {:ok, blocker} = Bee.create("Blocker", [priority: 1], server)
+    {:ok, blocked} = Bee.create("Blocked but higher priority", [priority: 100], server)
+    :ok = Bee.block(blocked.id, blocker.id, server)
+
+    assert {:ok, %{issues: issues}} = Bee.ask(:what_next, [limit: 5], server)
+    assert Enum.map(issues, & &1.id) == [blocker.id]
   end
 
   test "external transforms use the compute lane and fail soft", %{server: server} do
