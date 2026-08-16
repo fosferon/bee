@@ -61,6 +61,18 @@ defmodule Bee.QuerySpecTest do
     assert first == second
   end
 
+  test "coordination events advance issue recency ordering", %{server: server} do
+    {:ok, first} = Bee.create("First", [], server)
+    {:ok, second} = Bee.create("Second", [], server)
+
+    :ok = Bee.comment(first.id, "new coordination evidence", [], server)
+
+    assert {:ok, %{issues: issues}} =
+             Bee.query([order_by: [updated_at: :desc], detail: :minimal], server)
+
+    assert Enum.map(issues, & &1.id) == [first.id, second.id]
+  end
+
   test "query combines plain-text FTS, multiple projects, recency, and minimal detail", %{
     server: server
   } do

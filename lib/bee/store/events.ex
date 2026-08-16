@@ -6,6 +6,8 @@ defmodule Bee.Store.Events do
   @spec record(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
   def record(conn, issue_id, event_type, opts \\ []) do
+    now = now_iso()
+
     with {:ok, seq} <- next_sequence(conn, issue_id),
          {:ok, payload} <- payload(opts, seq),
          :ok <-
@@ -21,9 +23,10 @@ defmodule Bee.Store.Events do
                event_type,
                Jason.encode!(payload),
                Keyword.get(opts, :actor),
-               now_iso()
+               now
              ]
-           ) do
+           ),
+         :ok <- execute(conn, "UPDATE issues SET updated_at = ? WHERE id = ?", [now, issue_id]) do
       {:ok, seq}
     end
   end
