@@ -26,9 +26,17 @@ defmodule Bee.Store.Events do
                now
              ]
            ),
-         :ok <- execute(conn, "UPDATE issues SET updated_at = ? WHERE id = ?", [now, issue_id]) do
+         :ok <- touch_issue(conn, issue_id, event_type, now) do
       {:ok, seq}
     end
+  end
+
+  # Creation already writes the issue timestamp in the same transaction. Avoid a
+  # second timestamp that would make the issue returned by create immediately stale.
+  defp touch_issue(_conn, _issue_id, "issue.created", _now), do: :ok
+
+  defp touch_issue(conn, issue_id, _event_type, now) do
+    execute(conn, "UPDATE issues SET updated_at = ? WHERE id = ?", [now, issue_id])
   end
 
   defp payload(opts, seq) do
