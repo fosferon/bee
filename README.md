@@ -45,7 +45,7 @@ rename is pending). For now, depend on it directly from Git:
 ```elixir
 def deps do
   [
-    {:bee, git: "https://github.com/fosferon/bee.git", tag: "v0.1.0"}
+    {:bee, git: "https://github.com/fosferon/bee.git", tag: "v0.2.0"}
   ]
 end
 ```
