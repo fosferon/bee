@@ -28,8 +28,7 @@ defmodule Bee.MixProject do
       {:exqlite, "~> 0.34"},
       {:jason, "~> 1.4"},
       {:nimble_pool, "~> 1.1"},
-      {:ex_doc, "~> 0.36", only: :dev, runtime: false},
-      {:earmark, "~> 1.4", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.36", only: :dev, runtime: false}
     ]
   end
 
