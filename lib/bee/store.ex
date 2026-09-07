@@ -2,6 +2,15 @@ defmodule Bee.Store do
   @moduledoc false
 
   @order_columns ~w(created_at updated_at priority id)a
+
+  # Issue ids are TEXT of the form "<prefix>-<n>", so plain SQL ordering is
+  # lexicographic: 'GC-99' sorts ABOVE 'GC-100'. Order on the numeric suffix
+  # instead. rtrim(id, digits) yields the non-numeric prefix ("GC-"); removing
+  # it leaves the number. Ids with no digits cast to 0; ids that are bare
+  # numbers are unaffected (SQLite's replace/3 with an empty pattern is a
+  # no-op).
+  @id_numeric "CAST(replace(id, rtrim(id, '0123456789'), '') AS INTEGER)"
+
   @order_directions [:asc, :desc]
 
   @spec init_schema(Exqlite.Sqlite3.db()) :: :ok
@@ -740,6 +749,9 @@ defmodule Bee.Store do
         case col do
           :priority ->
             "priority IS NULL, #{col_str} #{dir_str}"
+
+          :id ->
+            "#{@id_numeric} #{dir_str}, id #{dir_str}"
 
           _ ->
             "#{col_str} #{dir_str}"

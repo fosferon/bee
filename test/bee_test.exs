@@ -320,6 +320,19 @@ defmodule BeeTest do
       assert Enum.map(desc, & &1.id) == [3, 2, 1]
     end
 
+    # Ids are stored as TEXT ("test-99"), so ordering them as text puts
+    # 'test-99' above 'test-100'. Every id order was wrong at each digit
+    # boundary until this crossed one.
+    test "order_by id is numeric across a digit-count boundary", %{server: s} do
+      for i <- 1..101, do: {:ok, _} = Bee.create("Issue #{i}", [], s)
+
+      {:ok, desc} = Bee.list([order_by: [id: :desc], limit: 3], s)
+      assert Enum.map(desc, & &1.id) == [101, 100, 99]
+
+      {:ok, asc} = Bee.list([order_by: [id: :asc], limit: 3], s)
+      assert Enum.map(asc, & &1.id) == [1, 2, 3]
+    end
+
     test "order_by rejects non-whitelisted column", %{server: s} do
       {:ok, _} = Bee.create("Issue", [], s)
 
