@@ -228,8 +228,14 @@ defmodule Bee.Store do
         {:ok, cols} = Exqlite.Sqlite3.columns(conn, stmt)
         Exqlite.Sqlite3.release(conn, stmt)
         issue = row_to_issue(cols, row)
-        issue = enrich_issues([issue], conn, opts) |> hd()
-        {:ok, issue}
+
+        # A row whose id will not parse cannot be represented, so from the
+        # caller's side it is simply absent. Returning :not_found beats letting
+        # `hd([])` raise a badarg that names nothing (GC-4873).
+        case enrich_issues([issue], conn, opts) do
+          [enriched] -> {:ok, enriched}
+          [] -> {:error, :not_found}
+        end
 
       :done ->
         Exqlite.Sqlite3.release(conn, stmt)
@@ -464,7 +470,7 @@ defmodule Bee.Store do
         descendant_ids = gather_descendants(conn, root_ids)
         all_raw_ids = root_ids ++ descendant_ids
         issues = fetch_and_enrich_by_ids(conn, all_raw_ids, opts)
-        root_enriched_ids = root_ids |> Enum.map(&parse_numeric_id/1)
+        root_enriched_ids = parse_id_refs(root_ids, "tree roots", "tree")
         {:ok, %{roots: root_enriched_ids, issues: issues, total_roots: total_roots}}
     end
   end
@@ -870,7 +876,13 @@ defmodule Bee.Store do
     order_map =
       raw_ids
       |> Enum.with_index()
-      |> Map.new(fn {raw_id, idx} -> {parse_numeric_id(raw_id), idx} end)
+      |> Enum.flat_map(fn {raw_id, idx} ->
+        case Bee.Id.parse(raw_id) do
+          {:ok, n} -> [{n, idx}]
+          {:error, :invalid_id} -> []
+        end
+      end)
+      |> Map.new()
 
     Enum.sort_by(issues, fn issue ->
       Map.get(order_map, issue.id, 999_999)
@@ -945,37 +957,78 @@ defmodule Bee.Store do
         %{}
       end
 
-    Enum.map(issues, fn issue ->
+    Enum.flat_map(issues, fn issue ->
       comments = Map.get(comments_by_issue, issue.id, :not_loaded)
       enrich_issue(issue, conn, comments)
     end)
   end
 
+  # Returns [] for a row whose own id cannot be parsed, so one malformed row is
+  # dropped from the result instead of raising through the whole read (GC-4873).
   defp enrich_issue(issue, conn, comments) do
-    labels = get_labels(conn, issue.id)
-    blocked_by = get_blocked_by(conn, issue.id)
-    blocks = get_blocks(conn, issue.id)
+    case Bee.Id.parse(issue.id) do
+      {:error, :invalid_id} ->
+        warn_unparseable("issue row", issue.id)
+        []
 
-    numeric_id = parse_numeric_id(issue.id)
-    blocked_by_numeric = Enum.map(blocked_by, &parse_numeric_id/1)
-    blocks_numeric = Enum.map(blocks, &parse_numeric_id/1)
-    parent_numeric = if issue.parent, do: parse_numeric_id(issue.parent)
+      {:ok, numeric_id} ->
+        labels = get_labels(conn, issue.id)
+        lock = get_lock_info(conn, issue.id)
 
-    lock = get_lock_info(conn, issue.id)
-
-    Map.merge(issue, %{
-      id: numeric_id,
-      labels: labels,
-      blocked_by: blocked_by_numeric,
-      blocks: blocks_numeric,
-      parent: parent_numeric,
-      locked: lock != nil,
-      lock: lock,
-      comments: comments
-    })
+        [
+          Map.merge(issue, %{
+            id: numeric_id,
+            labels: labels,
+            blocked_by: parse_id_refs(get_blocked_by(conn, issue.id), "blocked_by", issue.id),
+            blocks: parse_id_refs(get_blocks(conn, issue.id), "blocks", issue.id),
+            parent: parse_parent_ref(issue.parent, issue.id),
+            locked: lock != nil,
+            lock: lock,
+            comments: comments
+          })
+        ]
+    end
   end
 
-  defp parse_numeric_id(id), do: Bee.Id.parse!(id)
+  # A dangling REFERENCE is not the same failure as an unrepresentable row: the
+  # issue itself is fine and still worth returning, so drop the bad edge and keep
+  # the row rather than discarding real work over a broken pointer.
+  defp parse_id_refs(ids, field, owner_id) do
+    Enum.flat_map(ids, fn id ->
+      case Bee.Id.parse(id) do
+        {:ok, n} ->
+          [n]
+
+        {:error, :invalid_id} ->
+          warn_unparseable("#{field} of #{owner_id}", id)
+          []
+      end
+    end)
+  end
+
+  defp parse_parent_ref(nil, _owner_id), do: nil
+
+  defp parse_parent_ref(parent, owner_id) do
+    case Bee.Id.parse(parent) do
+      {:ok, n} ->
+        n
+
+      {:error, :invalid_id} ->
+        warn_unparseable("parent of #{owner_id}", parent)
+        nil
+    end
+  end
+
+  defp warn_unparseable(where, id) do
+    require Logger
+
+    Logger.warning(
+      "[Bee.Store] skipping unparseable id in #{where}: #{inspect(id)}. " <>
+        "Something wrote to bee.db outside Bee's id allocation (a migration, " <>
+        "scripts/bee-merge, or a manual repair). The row is excluded from this " <>
+        "result; the rest of the read is unaffected (GC-4873)."
+    )
+  end
 
   defp get_lock_info(conn, issue_id) do
     {:ok, stmt} =
