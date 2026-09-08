@@ -5,7 +5,7 @@
 /cover/
 
 # The directory Mix downloads your dependencies sources to.
-/deps/
+/deps
 
 # Where third-party dependencies like ExDoc output generated docs.
 /doc/
@@ -27,7 +27,18 @@ bee-*.tar
 .elixir_context/
 
 # Local agent tooling and generated workspace assets stay outside source control.
-/.*
-/*
-!/_bmad-output/
-!/_bmad-output/**
+#
+# Named explicitly rather than as a blanket `/*` with an allowlist. That form
+# ignored the ENTIRE repository root and re-included only _bmad-output, so no new
+# source file could be committed without -f. It looked harmless because git never
+# ignores what it already tracks, so the 34 files in lib/ and 11 in test/ kept
+# working — until a new test was silently dropped from a commit (GC-4873).
+/.agent/
+/.agents/
+/.claude/
+/.factory/
+/.opencode/
+/.logs/
+/.worktrees/
+/_bmad/
+/design-artifacts/
