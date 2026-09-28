@@ -62,6 +62,36 @@ defmodule Bee do
     do: GenServer.call(server, {:get_comments, id})
 
   @doc """
+  Atomically links an existing Bee issue to a Work Lane as `"root"` or
+  `"member"`. `attrs` has exactly `:command_id`, `:lane_id`, `:issue_id`
+  (a full Bee issue ID), `:role`, and `:project_id` (the expected Bee
+  project, or `nil`). A matching command replays its durable receipt.
+  Conflicts and missing issues return tagged errors without changing a link.
+  This command never changes `issues.project_id`.
+  """
+  def associate_lane_issue(attrs, server \\ @default_server) do
+    unless Bee.Store.LaneAssociation.valid?(attrs) do
+      raise ArgumentError, "invalid lane association"
+    end
+
+    GenServer.call(server, {:associate_lane_issue, attrs})
+  end
+
+  @doc """
+  Reads a Bee-owned receipt and its *current* issue/link state on the writer.
+  `:matching` proves the recorded link and project still match; `:stale`
+  means they have drifted. `:not_found` is a snapshot, not proof that an
+  earlier queued or uncertain command can never commit.
+  """
+  def reconcile_lane_issue(command_id, server \\ @default_server) do
+    unless is_binary(command_id) and byte_size(command_id) in 1..256 do
+      raise ArgumentError, "invalid lane association command ID"
+    end
+
+    GenServer.call(server, {:reconcile_lane_issue, command_id})
+  end
+
+  @doc """
   Returns `{:ok, issues}` — every open issue with no *gating* dependency still
   outstanding. Honours `:blocks`, `:waits_for`, and `:conditional_blocks`.
   """

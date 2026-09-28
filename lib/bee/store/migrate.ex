@@ -96,7 +96,8 @@ defmodule Bee.Store.Migrate do
       migration_003(),
       migration_004(),
       migration_005(),
-      migration_006()
+      migration_006(),
+      migration_007()
     ]
 
   @spec migration_000() :: migration()
@@ -119,6 +120,40 @@ defmodule Bee.Store.Migrate do
 
   @spec migration_006() :: migration()
   def migration_006, do: {7, :add_measure_domains, &add_measure_domains/1}
+
+  @spec migration_007() :: migration()
+  def migration_007, do: {8, :add_lane_issue_associations, &add_lane_issue_associations/1}
+
+  defp add_lane_issue_associations(conn) do
+    [
+      """
+      CREATE TABLE lane_issue_links (
+        lane_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('root', 'member')),
+        PRIMARY KEY (lane_id, issue_id)
+      )
+      """,
+      "CREATE UNIQUE INDEX lane_issue_one_root ON lane_issue_links(lane_id) WHERE role = 'root'",
+      """
+      CREATE TABLE lane_issue_receipts (
+        command_id TEXT PRIMARY KEY,
+        lane_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('root', 'member')),
+        project_id TEXT,
+        event_seq INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      )
+      """
+    ]
+    |> Enum.reduce_while(:ok, fn sql, :ok ->
+      case execute(conn, sql) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   @spec detect_baseline(Exqlite.Sqlite3.db()) ::
           {:ok, :fresh | :legacy_base | :legacy_extended} | {:error, :unknown_baseline}

@@ -36,6 +36,8 @@ can never fail outside the protocol's declared validation boundary.
 | `{:get, id}` | `{:ok, issue}` with `comments: :not_loaded` | `{:error, :not_found}` |
 | `{:get, id, opts}` | `{:ok, issue}` with requested relations | `{:error, :not_found \| {:invalid_include, value}}` |
 | `{:get_comments, id}` | `{:ok, comments}` | none |
+| `{:associate_lane_issue, %{command_id:, lane_id:, issue_id:, role:, project_id:}}` | `{:ok, receipt}` | `{:error, :invalid_lane_association \| :issue_not_found \| :association_conflict \| reason}` |
+| `{:reconcile_lane_issue, command_id}` | `{:ok, %{receipt: receipt, current: :matching \| :stale}}` | `{:error, :not_found \| :invalid_lane_association \| reason}` |
 | `{:ready, opts}` | `{:ok, issues}` | none |
 | `{:list, opts}` | `{:ok, issues}` | `{:error, reason}` for invalid boundary options |
 | `{:count, opts}` | `{:ok, count}` | `{:error, reason}` for invalid boundary options |

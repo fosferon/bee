@@ -170,6 +170,35 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
+  def handle_call({:associate_lane_issue, attrs}, _from, state) do
+    if Bee.Store.LaneAssociation.valid?(attrs) and
+         String.starts_with?(attrs.issue_id, state.prefix <> "-") and
+         match?({:ok, id} when id > 0, Bee.Id.parse(attrs.issue_id)) do
+      result =
+        transaction(state.conn, fn ->
+          Bee.Store.LaneAssociation.associate(state.conn, attrs)
+        end)
+
+      case result do
+        {:ok, receipt} -> {:reply, {:ok, receipt}, state}
+        {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+      end
+    else
+      {:reply, {:error, :invalid_lane_association}, state}
+    end
+  end
+
+  def handle_call({:reconcile_lane_issue, command_id}, _from, state) do
+    result =
+      if is_binary(command_id) and byte_size(command_id) in 1..256 do
+        Bee.Store.LaneAssociation.reconcile(state.conn, command_id)
+      else
+        {:error, :invalid_lane_association}
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call({:get, id, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
