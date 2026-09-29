@@ -84,6 +84,8 @@ defmodule Bee.Repo do
             nil
           end
 
+        register_reader(Keyword.get(opts, :name, __MODULE__), pool_name, prefix)
+
         {:ok,
          %{
            conn: conn,
@@ -235,7 +237,7 @@ defmodule Bee.Repo do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         lane = Bee.Query.Classifier.classify(:count)
-        result = read_with_pool(state, lane, fn conn -> Bee.Store.count_issues(conn, opts) end)
+        result = read_with_pool(state, lane, &count(&1, opts, state.prefix))
         {:reply, result, state}
 
       {:error, reason} ->
@@ -249,7 +251,9 @@ defmodule Bee.Repo do
         lane = Bee.Query.Classifier.classify(spec)
 
         result =
-          read_with_pool(state, lane, fn conn -> Bee.Query.Interpreter.execute(conn, spec) end)
+          read_with_pool(state, lane, fn conn ->
+            Bee.Query.Interpreter.execute(conn, spec, state.prefix)
+          end)
 
         {:reply, result, state}
 
@@ -258,11 +262,19 @@ defmodule Bee.Repo do
     end
   end
 
+  def handle_call({:ancestors, id}, _from, state) do
+    result = read_with_pool(state, :fast, &ancestors(&1, id, state.prefix))
+    {:reply, result, state}
+  end
+
   def handle_call({:ask, intent, opts}, _from, state) do
     result =
       with {:ok, spec} <- resolve_intent(state.conn, intent, opts) do
         lane = Bee.Query.Classifier.classify(spec)
-        read_with_pool(state, lane, fn conn -> Bee.Query.Interpreter.execute(conn, spec) end)
+
+        read_with_pool(state, lane, fn conn ->
+          Bee.Query.Interpreter.execute(conn, spec, state.prefix)
+        end)
       end
 
     if match?({:ok, _}, result), do: record_intent_usage_async(self(), intent)
@@ -930,6 +942,67 @@ defmodule Bee.Repo do
 
     Task.start(fn -> GenServer.cast(repo, {:record_intent_usage, name, kind}) end)
   end
+
+  # --- Reads that bypass this process (GC-5834) ---
+  #
+  # A read has no business queueing behind writes. `Bee.query/2`, `Bee.count/2` and
+  # `Bee.ancestors/2` check a connection out of the read pool in the CALLER's
+  # process, so a board scrolling under write load waits only for a pooled reader.
+  # To do that the caller needs this Repo's pool and id prefix; they are published
+  # here at init, keyed by the registered name.
+
+  @doc false
+  @spec read(atom() | pid(), :fast | :compute, (Exqlite.Sqlite3.db(), String.t() -> term())) ::
+          {:ok, term()} | :unavailable
+  def read(server, lane, fun) when is_atom(server) do
+    with %{pool: pool, prefix: prefix} <- :persistent_term.get({__MODULE__, :reader, server}, nil),
+         true <- is_pid(GenServer.whereis(lane_pool_name(pool, lane))) do
+      {:ok, Bee.Read.Pool.with_connection(pool, lane, &fun.(&1, prefix))}
+    else
+      _ -> :unavailable
+    end
+  end
+
+  def read(_server, _lane, _fun), do: :unavailable
+
+  @doc false
+  @spec count(Exqlite.Sqlite3.db(), keyword(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count(conn, opts, prefix) do
+    with {:ok, opts} <- Bee.Store.resolve_under(conn, opts, prefix) do
+      Bee.Store.count_issues(conn, opts)
+    end
+  end
+
+  @doc false
+  @spec ancestors(Exqlite.Sqlite3.db(), term(), String.t()) ::
+          {:ok, [map()]} | {:error, :not_found}
+  def ancestors(conn, id, prefix) do
+    with {:ok, [under: full]} <- Bee.Store.resolve_under(conn, [under: id], prefix) do
+      chain =
+        conn
+        |> Bee.Store.Tree.ancestor_chains([full])
+        |> Map.get(full, [])
+        |> Enum.flat_map(fn ancestor ->
+          case Bee.Id.parse(ancestor.id) do
+            {:ok, n} -> [ancestor |> Map.delete(:dist) |> Map.put(:id, n)]
+            {:error, :invalid_id} -> []
+          end
+        end)
+
+      {:ok, chain}
+    else
+      {:error, {:not_found, _id}} -> {:error, :not_found}
+    end
+  end
+
+  defp register_reader(name, pool_name, prefix) when is_atom(name),
+    do: :persistent_term.put({__MODULE__, :reader, name}, %{pool: pool_name, prefix: prefix})
+
+  defp register_reader(_name, _pool_name, _prefix), do: :ok
+
+  defp lane_pool_name(pool, :fast), do: Bee.Read.Pool.fast_pool_name(pool)
+  defp lane_pool_name(pool, :compute), do: Bee.Read.Pool.compute_pool_name(pool)
 
   defp read_pool_name(opts) do
     case Keyword.get(opts, :pool_name) do

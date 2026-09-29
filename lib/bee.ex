@@ -102,9 +102,23 @@ defmodule Bee do
     GenServer.call(server, {:list, opts})
   end
 
+  @doc """
+  Counts issues matching `opts`: the `list/2` filters plus the query spec's filter
+  fields (`:under`, `:include_root`, `:depth`, `:labels_any`, `:issue_types`,
+  `:priority_min`, `:priority_max`, `:has_children`, `:blocked`). An unknown
+  `:under` returns `{:error, {:not_found, id}}`.
+
+  Runs on a pooled reader in the caller's process, not through the writer.
+  """
   def count(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
-    GenServer.call(server, {:count, opts})
+
+    lane = Bee.Query.Classifier.classify(:count)
+
+    case Bee.Repo.read(server, lane, &Bee.Repo.count(&1, opts, &2)) do
+      {:ok, result} -> result
+      :unavailable -> GenServer.call(server, {:count, opts})
+    end
   end
 
   @doc """
@@ -113,14 +127,56 @@ defmodule Bee do
 
   `withheld` reports omissions (a truncated `limit`, omitted relations) and `refine`
   suggests how to ask for what was held back. Filter by plain-text `:text`, `:status`,
-  one `:project_id` or any of `:project_ids`, `:ready`, `:assigned_to`, and `:labels`;
-  sort with `:order_by`; page with `:limit` / `:offset`; load relations with `:include`;
-  and shape each result with `:detail`
-  (`:minimal | :compact | :standard | :full`).
+  one `:project_id` or any of `:project_ids`, `:ready`, `:blocked`, `:assigned_to`,
+  `:labels` (all of) or `:labels_any` (any of), `:issue_types`, `:priority_min` /
+  `:priority_max`, and `:has_children`; sort with `:order_by`; page with `:limit` and
+  either `:offset` or an `:after` cursor; load relations with `:include`; and shape
+  each result with `:detail` (`:minimal | :compact | :standard | :full`).
+
+  The result also carries `total` (the match count without `limit`/`after`) and
+  `next`, a keyset cursor for the following page (or nil). Pass it back as `:after`
+  with the same spec: unlike an offset it stays stable while issues are created or
+  closed between pages.
+
+  ## Parent trees
+
+    * `:under` — only strict descendants of that issue over parent edges
+      (`include_root: true` adds the issue itself at depth 0). An unknown id returns
+      `{:error, {:not_found, id}}`.
+    * `:depth` (0..10) — the deepest level returned; each issue then carries `depth`.
+      With `:under`, children are depth 1. Without it, depth counts from the nearest
+      ancestor that passes the `:status` filter, so an open issue under a closed
+      parent is depth 0 in an open-only view.
+    * `fold: true` (requires `:depth`) — each issue carries `rollup`, counts over its
+      whole real subtree whatever the other filters say.
+    * `path: true` — each issue carries `path`, its ancestors from the top down to its
+      parent, closed ones included.
+    * `keep_ancestors: true` — the ancestors of each match come back too, marked
+      `context: true` and listed first; they do not count toward `limit` or `total`.
+
+  Runs on a pooled reader in the caller's process, not through the writer.
   """
   def query(spec, server \\ @default_server) do
     spec = Bee.Query.Spec.new!(spec)
-    GenServer.call(server, {:query, spec})
+    lane = Bee.Query.Classifier.classify(spec)
+
+    case Bee.Repo.read(server, lane, &Bee.Query.Interpreter.execute(&1, spec, &2)) do
+      {:ok, result} -> result
+      :unavailable -> GenServer.call(server, {:query, spec})
+    end
+  end
+
+  @doc """
+  Returns `{:ok, [%{id, title, status, issue_type, project_id}]}`: the parent chain
+  of `id`, root first, excluding `id` itself (`[]` for a root). `{:error,
+  :not_found}` for an unknown id. The walk is bounded, so it terminates even over a
+  corrupted parent cycle.
+  """
+  def ancestors(id, server \\ @default_server) do
+    case Bee.Repo.read(server, :fast, &Bee.Repo.ancestors(&1, id, &2)) do
+      {:ok, result} -> result
+      :unavailable -> GenServer.call(server, {:ancestors, id})
+    end
   end
 
   @doc """

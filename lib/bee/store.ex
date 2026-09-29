@@ -327,7 +327,7 @@ defmodule Bee.Store do
          :ok <- validate_limit(Keyword.get(opts, :limit)),
          :ok <- validate_offset(Keyword.get(opts, :offset)),
          :ok <- validate_include(Keyword.get(opts, :include)) do
-      :ok
+      Bee.Query.Spec.validate_filter_opts(opts)
     end
   end
 
@@ -379,17 +379,13 @@ defmodule Bee.Store do
   defp describe_opts_error({:invalid_limit, v}), do: "invalid limit: #{inspect(v)}"
   defp describe_opts_error({:invalid_offset, v}), do: "invalid offset: #{inspect(v)}"
   defp describe_opts_error({:invalid_include, v}), do: "invalid include: #{inspect(v)}"
+  defp describe_opts_error({:invalid_filter, key, v}), do: "invalid #{key}: #{inspect(v)}"
+  defp describe_opts_error({:invalid_depth, v}), do: "invalid depth: #{inspect(v)}"
 
   @spec list_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
   def list_issues(conn, opts \\ []) do
-    {where, params} = build_where(opts)
-    {order_sql, order_params} = build_order(opts, default_order())
-    {limit_sql, limit_params} = build_limit_offset(opts)
-    sql = "SELECT * FROM issues#{where}#{order_sql}#{limit_sql}"
-
-    with {:ok, issues} <- run_query(conn, sql, params ++ order_params ++ limit_params) do
-      {:ok, enrich_issues(issues, conn, opts)}
-    end
+    {:ok, %{rows: issues}} = query_page(conn, opts)
+    {:ok, enrich_issues(issues, conn, opts)}
   end
 
   @spec list_issues_raw(Exqlite.Sqlite3.db(), keyword()) :: {:ok, [map()]}
@@ -403,20 +399,269 @@ defmodule Bee.Store do
 
   @spec count_issues(Exqlite.Sqlite3.db(), keyword()) :: {:ok, non_neg_integer()}
   def count_issues(conn, opts \\ []) do
-    {where, params} = build_where(opts)
-    sql = "SELECT COUNT(*) FROM issues#{where}"
-    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
-    unless params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, params)
+    {:ok, %{total: total}} = query_total(conn, opts)
+    {:ok, total}
+  end
 
-    count =
+  # --- Composable query: parent scope, keyset pages, totals (GC-5834) ---
+
+  # Cycle guard for walks over `parent`. Bee.Store.Acyclic keeps parent edges
+  # acyclic, but a recursive CTE must terminate even over a database something else
+  # wrote. Real trees are about 5 deep.
+  @parent_walk_cap 20
+
+  # Every issue that is some issue's parent (NULL excluded, so NOT IN is safe).
+  @parents_sql "SELECT hc.parent FROM issues hc WHERE hc.parent IS NOT NULL"
+
+  @doc """
+  Resolves the `:under` option to a stored issue id, in place.
+
+  `under` may be any id form `Bee.Repo` accepts. Returns
+  `{:error, {:not_found, under}}` (naming the id as given) when no such issue
+  exists, so an unknown root is an answer, never an empty result that looks like a
+  leaf.
+  """
+  @spec resolve_under(Exqlite.Sqlite3.db(), keyword(), String.t()) ::
+          {:ok, keyword()} | {:error, {:not_found, term()}}
+  def resolve_under(conn, opts, prefix) do
+    case Keyword.get(opts, :under) do
+      nil ->
+        {:ok, opts}
+
+      under ->
+        with {:ok, full} <- full_id(under, prefix),
+             {:ok, _parent} <- issue_parent(conn, full) do
+          {:ok, Keyword.put(opts, :under, full)}
+        else
+          _ -> {:error, {:not_found, under}}
+        end
+    end
+  end
+
+  defp full_id(id, prefix) do
+    {:ok, Bee.Id.to_prefixed(id, prefix)}
+  rescue
+    ArgumentError -> {:error, :invalid_id}
+  end
+
+  @doc """
+  Returns one page of raw (unenriched) issue rows for the filter opts.
+
+  `keyset` is a decoded `Bee.Query.Cursor`: when given, only rows strictly after it
+  in the opts' `:order_by` are returned. With a `:limit`, one extra row is fetched to
+  learn whether more exist (`more?`) and dropped. Every row carries `:depth` when
+  `:under` or `:depth` scopes the query.
+  """
+  @spec query_page(Exqlite.Sqlite3.db(), keyword(), list() | nil) ::
+          {:ok, %{rows: [map()], more?: boolean()}}
+  def query_page(conn, opts, keyset \\ nil) do
+    {cte, cte_params, from, depth_select, scope_clauses} = build_scope(opts)
+    {clauses, params} = build_where_clauses(opts)
+    {keyset_sql, keyset_params} = build_keyset(keyset)
+    where = join_where(scope_clauses ++ clauses ++ List.wrap(keyset_sql))
+    {order_sql, order_params} = build_order(opts, default_order())
+    limit = Keyword.get(opts, :limit)
+    probe_opts = if limit, do: Keyword.put(opts, :limit, limit + 1), else: opts
+    {limit_sql, limit_params} = build_limit_offset(probe_opts)
+
+    sql =
+      "#{cte}SELECT issues.*#{depth_select} FROM #{from}#{where}#{order_sql}#{limit_sql}"
+
+    all_params = cte_params ++ params ++ keyset_params ++ order_params ++ limit_params
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    unless all_params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, all_params)
+    rows = collect_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    issues = Enum.map(rows, &scoped_row_to_issue/1)
+
+    case limit do
+      limit when is_integer(limit) and length(issues) > limit ->
+        {:ok, %{rows: Enum.take(issues, limit), more?: true}}
+
+      _ ->
+        {:ok, %{rows: issues, more?: false}}
+    end
+  end
+
+  @doc """
+  Counts the rows `query_page/3` would return with no limit, offset or cursor.
+
+  With a `keyset`, the same single scan also counts the rows after the cursor
+  (`remaining`); otherwise `remaining` is nil.
+  """
+  @spec query_total(Exqlite.Sqlite3.db(), keyword(), list() | nil) ::
+          {:ok, %{total: non_neg_integer(), remaining: non_neg_integer() | nil}}
+  def query_total(conn, opts, keyset \\ nil) do
+    {cte, cte_params, from, _depth_select, scope_clauses} = build_scope(opts)
+    {clauses, params} = build_where_clauses(opts)
+    {keyset_sql, keyset_params} = build_keyset(keyset)
+
+    remaining_sql =
+      if keyset_sql,
+        do: ", COALESCE(SUM(CASE WHEN #{keyset_sql} THEN 1 ELSE 0 END), 0)",
+        else: ""
+
+    sql =
+      "#{cte}SELECT COUNT(*)#{remaining_sql} FROM #{from}#{join_where(scope_clauses ++ clauses)}"
+
+    all_params = cte_params ++ keyset_params ++ params
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+    unless all_params == [], do: :ok = Exqlite.Sqlite3.bind(stmt, all_params)
+
+    result =
       case Exqlite.Sqlite3.step(conn, stmt) do
-        {:row, [val]} -> val
-        :done -> 0
+        {:row, [total]} -> %{total: total, remaining: nil}
+        {:row, [total, remaining]} -> %{total: total, remaining: remaining}
       end
 
     Exqlite.Sqlite3.release(conn, stmt)
-    {:ok, count}
+    {:ok, result}
   end
+
+  @doc "Fetches raw (unenriched) issue rows by stored id, in no particular order."
+  @spec get_raw_issues(Exqlite.Sqlite3.db(), [String.t()]) :: [map()]
+  def get_raw_issues(_conn, []), do: []
+
+  def get_raw_issues(conn, raw_ids) do
+    placeholders = Enum.map_join(raw_ids, ", ", fn _ -> "?" end)
+    {:ok, issues} = run_query(conn, "SELECT * FROM issues WHERE id IN (#{placeholders})", raw_ids)
+    issues
+  end
+
+  @doc """
+  Enriches raw issue rows (numeric ids, labels, dependency edges, lock, and
+  comments when `include: [:comments]`). Keys a row already carries beyond the
+  stored columns (such as `:depth`) survive.
+  """
+  @spec enrich(Exqlite.Sqlite3.db(), [map()], keyword()) :: [map()]
+  def enrich(conn, issues, opts), do: enrich_issues(issues, conn, opts)
+
+  # The parent scope a query walks, as {cte, cte_params, from, depth_select, clauses}.
+  #
+  # With `:under`, depth is literal parent distance from that root (children are 1)
+  # whatever their status; the walk is bounded by `:depth`, or by the cycle cap.
+  #
+  # With only `:depth`, depth counts from the nearest ancestor that passes the
+  # STATUS filter: a depth-0 row passes it and has no parent that does. So an open
+  # issue under a closed parent is depth 0 in an open-only view, the way it looks on
+  # a board. Only `:status` defines that view; other filters narrow the rows
+  # returned, not where a tree starts.
+  defp build_scope(opts) do
+    case {Keyword.get(opts, :under), Keyword.get(opts, :depth)} do
+      {nil, nil} ->
+        {"", [], "issues", "", []}
+
+      {under, depth} when is_binary(under) ->
+        cte = """
+        WITH RECURSIVE bee_scope(scope_id, scope_depth) AS (
+          SELECT ?, 0
+          UNION ALL
+          SELECT child.id, bee_scope.scope_depth + 1
+          FROM issues child JOIN bee_scope ON child.parent = bee_scope.scope_id
+          WHERE bee_scope.scope_depth < ?
+        )
+        """
+
+        clauses =
+          if Keyword.get(opts, :include_root, false),
+            do: [],
+            else: ["bee_scope.scope_depth >= 1"]
+
+        {cte, [under, depth || @parent_walk_cap], scope_join(), scope_depth_select(), clauses}
+
+      {nil, depth} ->
+        {root_status, up_status, child_status, status_params} =
+          case Keyword.get(opts, :status) do
+            nil ->
+              {"", "", "", []}
+
+            status ->
+              {"root.status = ? AND ", " AND up.status = ?", "+child.status = ? AND ", [status]}
+          end
+
+        # `+child.status` keeps the status index out of the recursive step, which must
+        # probe idx_issues_parent for each queued parent.
+        cte = """
+        WITH RECURSIVE bee_scope(scope_id, scope_depth) AS (
+          SELECT root.id, 0 FROM issues root
+          WHERE #{root_status}(root.parent IS NULL OR NOT EXISTS (
+            SELECT 1 FROM issues up WHERE up.id = root.parent#{up_status}
+          ))
+          UNION ALL
+          SELECT child.id, bee_scope.scope_depth + 1
+          FROM issues child JOIN bee_scope ON child.parent = bee_scope.scope_id
+          WHERE #{child_status}bee_scope.scope_depth < ?
+        )
+        """
+
+        params = status_params ++ status_params ++ status_params ++ [depth]
+        {cte, params, scope_join(), scope_depth_select(), []}
+    end
+  end
+
+  # CROSS JOIN pins the join order: walk the (small) scope and look each row up by
+  # primary key. Left to the planner, SQLite drove the scan from `issues` and probed
+  # the unindexed CTE per row: 2.7 s instead of milliseconds on a 5,300-issue DB.
+  defp scope_join, do: "bee_scope CROSS JOIN issues ON issues.id = bee_scope.scope_id"
+  defp scope_depth_select, do: ", bee_scope.scope_depth AS bee_depth"
+
+  defp scoped_row_to_issue({cols, row}) do
+    issue = row_to_issue(cols, row)
+
+    case Enum.find_index(cols, &(&1 == "bee_depth")) do
+      nil -> issue
+      index -> Map.put(issue, :depth, Enum.at(row, index))
+    end
+  end
+
+  defp join_where([]), do: ""
+  defp join_where(clauses), do: " WHERE " <> Enum.join(clauses, " AND ")
+
+  # "Strictly after the cursor row" in the page's ORDER BY. For order columns
+  # c1..cn this is (c1 after v1) OR (c1 = v1 AND c2 after v2) OR ..., each column
+  # compared the way build_order_clause/1 sorts it: priority with NULLs last in both
+  # directions, id by its numeric suffix and then its text.
+  defp build_keyset(nil), do: {nil, []}
+
+  defp build_keyset(keyed) do
+    {disjuncts, params, _equal, _equal_params} =
+      Enum.reduce(keyed, {[], [], [], []}, fn {column, direction, value},
+                                              {disjuncts, params, equal, equal_params} ->
+        {after_sql, after_params} = keyset_after(column, direction, value)
+        {equal_sql, eq_params} = keyset_equal(column, value)
+        term = Enum.join(equal ++ [after_sql], " AND ")
+
+        {disjuncts ++ ["(#{term})"], params ++ equal_params ++ after_params, equal ++ [equal_sql],
+         equal_params ++ eq_params}
+      end)
+
+    {"(" <> Enum.join(disjuncts, " OR ") <> ")", params}
+  end
+
+  # Nothing sorts after a NULL priority: NULLs are last in either direction.
+  defp keyset_after(:priority, _direction, nil), do: {"0 = 1", []}
+
+  defp keyset_after(:priority, direction, value),
+    do: {"(priority #{keyset_op(direction)} ? OR priority IS NULL)", [value]}
+
+  defp keyset_after(:id, direction, value) do
+    op = keyset_op(direction)
+    numeric = "CAST(replace(?, rtrim(?, '0123456789'), '') AS INTEGER)"
+
+    {"(#{@id_numeric} #{op} #{numeric} OR (#{@id_numeric} = #{numeric} AND id #{op} ?))",
+     [value, value, value, value, value]}
+  end
+
+  defp keyset_after(column, direction, value),
+    do: {"#{column} #{keyset_op(direction)} ?", [value]}
+
+  defp keyset_equal(:priority, nil), do: {"priority IS NULL", []}
+  defp keyset_equal(column, value), do: {"#{column} = ?", [value]}
+
+  defp keyset_op(:asc), do: ">"
+  defp keyset_op(:desc), do: "<"
 
   @spec count_roots(Exqlite.Sqlite3.db(), keyword()) :: {:ok, non_neg_integer()}
   def count_roots(conn, opts \\ []) do
@@ -1066,6 +1311,12 @@ defmodule Bee.Store do
   end
 
   defp build_where(opts) do
+    {clauses, params} = build_where_clauses(opts)
+    {join_where(clauses), params}
+  end
+
+  # Filter clauses over the `issues` table, in order, with their params in order.
+  defp build_where_clauses(opts) do
     {clauses, params} =
       Enum.reduce([:status, :project_id, :assigned_to], {[], []}, fn key, {c, p} ->
         case Keyword.get(opts, key) do
@@ -1152,11 +1403,86 @@ defmodule Bee.Store do
           {clauses, params}
       end
 
-    if clauses == [] do
-      {"", []}
-    else
-      {" WHERE " <> (clauses |> Enum.reverse() |> Enum.join(" AND ")), Enum.reverse(params)}
-    end
+    # The semi-joins below are `issues.id IN (SELECT ...)`, never a correlated
+    # EXISTS: SQLite 3.51 (bundled by exqlite) can rewrite `EXISTS (... IN (...))`
+    # into a join and return an issue once per matching row. IN has set semantics.
+
+    # `labels_any` is OR over labels; `labels` above keeps its AND semantics.
+    {clauses, params} =
+      case Keyword.get(opts, :labels_any) do
+        labels when is_list(labels) and labels != [] ->
+          placeholders = Enum.map_join(labels, ", ", fn _ -> "?" end)
+
+          clause =
+            "issues.id IN (SELECT il.issue_id FROM issue_labels il WHERE il.label IN (#{placeholders}))"
+
+          {[clause | clauses], Enum.reverse(labels) ++ params}
+
+        _ ->
+          {clauses, params}
+      end
+
+    {clauses, params} =
+      case Keyword.get(opts, :issue_types) do
+        types when is_list(types) and types != [] ->
+          placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+          {["issues.issue_type IN (#{placeholders})" | clauses], Enum.reverse(types) ++ params}
+
+        _ ->
+          {clauses, params}
+      end
+
+    # Inclusive range over raw priorities. A NULL priority compares as NULL, so it
+    # never matches a bounded range.
+    {clauses, params} =
+      Enum.reduce([priority_min: ">=", priority_max: "<="], {clauses, params}, fn {key, op},
+                                                                                  {c, p} ->
+        case Keyword.get(opts, key) do
+          value when is_integer(value) -> {["issues.priority #{op} ?" | c], [value | p]}
+          _ -> {c, p}
+        end
+      end)
+
+    # Any child counts, whatever its status: "has children" is about structure.
+    clauses =
+      case Keyword.get(opts, :has_children) do
+        true -> ["issues.id IN (#{@parents_sql})" | clauses]
+        false -> ["issues.id NOT IN (#{@parents_sql})" | clauses]
+        nil -> clauses
+      end
+
+    # Blocked is `ready` negated: open, with a gating dependency still unresolved.
+    {clauses, params} =
+      case Keyword.get(opts, :blocked) do
+        nil ->
+          {clauses, params}
+
+        blocked when is_boolean(blocked) ->
+          types = Bee.Dependency.Type.gating() |> Enum.map(&Bee.Dependency.Type.storage_name/1)
+          blocked_sql = blocked_clause("issues", types)
+          clause = if blocked, do: blocked_sql, else: "NOT #{blocked_sql}"
+          {[clause | clauses], Enum.reverse(types) ++ params}
+      end
+
+    {Enum.reverse(clauses), Enum.reverse(params)}
+  end
+
+  @doc false
+  # Open, with at least one gating dependency whose blocker is not closed or
+  # cancelled: the exact complement, among open issues, of the `ready` clause.
+  # Binds one param per gating type.
+  def blocked_clause(table, types) do
+    placeholders = Enum.map_join(types, ", ", fn _ -> "?" end)
+
+    """
+    (#{table}.status = 'open' AND #{table}.id IN (
+      SELECT blocked_dep.issue_id
+      FROM dependencies blocked_dep
+      INNER JOIN issues blocked_blocker ON blocked_blocker.id = blocked_dep.depends_on_id
+      WHERE blocked_dep.dep_type IN (#{placeholders})
+        AND blocked_blocker.status NOT IN ('closed', 'cancelled')
+    ))
+    """
   end
 
   defp now_iso, do: DateTime.utc_now() |> DateTime.to_iso8601()

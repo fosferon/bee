@@ -18,8 +18,25 @@ defmodule Bee.Query.Spec do
     :offset,
     :include,
     :detail,
-    :transforms
+    :transforms,
+    :under,
+    :include_root,
+    :depth,
+    :fold,
+    :path,
+    :keep_ancestors,
+    :labels_any,
+    :issue_types,
+    :priority_min,
+    :priority_max,
+    :has_children,
+    :blocked,
+    :after
   ]
+
+  # Parent-edge depth is bounded so a recursive walk can never run away. Real trees
+  # are about 5 deep; 10 leaves headroom without letting a caller ask for the world.
+  @max_depth 10
 
   @enforce_keys [:order_by]
   defstruct status: nil,
@@ -34,7 +51,20 @@ defmodule Bee.Query.Spec do
             offset: nil,
             include: [],
             detail: :compact,
-            transforms: %{}
+            transforms: %{},
+            under: nil,
+            include_root: false,
+            depth: nil,
+            fold: false,
+            path: false,
+            keep_ancestors: false,
+            labels_any: nil,
+            issue_types: nil,
+            priority_min: nil,
+            priority_max: nil,
+            has_children: nil,
+            blocked: nil,
+            after: nil
 
   @type t :: %__MODULE__{
           status: String.t() | nil,
@@ -49,7 +79,20 @@ defmodule Bee.Query.Spec do
           offset: non_neg_integer() | nil,
           include: [:comments | :labels],
           detail: :minimal | :compact | :standard | :full,
-          transforms: %{optional(atom()) => {:local, :trim} | {:external, atom()}}
+          transforms: %{optional(atom()) => {:local, :trim} | {:external, atom()}},
+          under: String.t() | pos_integer() | nil,
+          include_root: boolean(),
+          depth: 0..10 | nil,
+          fold: boolean(),
+          path: boolean(),
+          keep_ancestors: boolean(),
+          labels_any: [String.t()] | nil,
+          issue_types: [String.t()] | nil,
+          priority_min: integer() | nil,
+          priority_max: integer() | nil,
+          has_children: boolean() | nil,
+          blocked: boolean() | nil,
+          after: String.t() | nil
         }
 
   @spec fields() :: [atom()]
@@ -91,9 +134,37 @@ defmodule Bee.Query.Spec do
       order_by: spec.order_by,
       limit: spec.limit,
       offset: spec.offset,
-      include: spec.include
+      include: spec.include,
+      under: spec.under,
+      include_root: spec.include_root,
+      depth: spec.depth,
+      labels_any: spec.labels_any,
+      issue_types: spec.issue_types,
+      priority_min: spec.priority_min,
+      priority_max: spec.priority_max,
+      has_children: spec.has_children,
+      blocked: spec.blocked
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) or value == [] end)
+  end
+
+  @doc """
+  Validates the filter keys `Bee.count/2` and `Bee.list/2` share with a query spec
+  (`under`, `depth`, the label/type/priority ranges, `has_children`, `blocked`), so a
+  count can never accept a filter the query it counts would reject.
+  """
+  @spec validate_filter_opts(keyword()) :: :ok | {:error, term()}
+  def validate_filter_opts(opts) do
+    with :ok <- validate_under(Keyword.get(opts, :under)),
+         :ok <- validate_boolean(:include_root, Keyword.get(opts, :include_root, false)),
+         :ok <- validate_depth(Keyword.get(opts, :depth)),
+         :ok <- validate_string_list(:labels_any, Keyword.get(opts, :labels_any)),
+         :ok <- validate_string_list(:issue_types, Keyword.get(opts, :issue_types)),
+         :ok <- validate_integer(:priority_min, Keyword.get(opts, :priority_min)),
+         :ok <- validate_integer(:priority_max, Keyword.get(opts, :priority_max)),
+         :ok <- validate_optional_boolean(:has_children, Keyword.get(opts, :has_children)) do
+      validate_optional_boolean(:blocked, Keyword.get(opts, :blocked))
+    end
   end
 
   defp validate(spec) do
@@ -109,8 +180,15 @@ defmodule Bee.Query.Spec do
          :ok <- validate_offset(spec.offset),
          :ok <- validate_include(spec.include),
          :ok <- validate_detail(spec.detail),
-         :ok <- validate_transforms(spec.transforms) do
-      {:ok, %{spec | order_by: canonical_order(spec.order_by)}}
+         :ok <- validate_transforms(spec.transforms),
+         :ok <- spec |> Map.from_struct() |> Map.to_list() |> validate_filter_opts(),
+         :ok <- validate_boolean(:fold, spec.fold),
+         :ok <- validate_boolean(:path, spec.path),
+         :ok <- validate_boolean(:keep_ancestors, spec.keep_ancestors),
+         :ok <- validate_fold(spec.fold, spec.depth),
+         order_by = canonical_order(spec.order_by),
+         :ok <- validate_after(spec.after, spec.offset, order_by) do
+      {:ok, %{spec | order_by: order_by}}
     end
   end
 
@@ -201,6 +279,54 @@ defmodule Bee.Query.Spec do
 
   defp validate_transforms(_transforms), do: {:error, :invalid_transform}
 
+  defp validate_under(nil), do: :ok
+  defp validate_under(id) when is_binary(id) and id != "", do: :ok
+  defp validate_under(id) when is_integer(id) and id > 0, do: :ok
+  defp validate_under(id), do: {:error, {:invalid_filter, :under, id}}
+
+  defp validate_depth(nil), do: :ok
+  defp validate_depth(depth) when is_integer(depth) and depth in 0..@max_depth, do: :ok
+  defp validate_depth(depth), do: {:error, {:invalid_depth, depth}}
+
+  defp validate_boolean(_key, value) when is_boolean(value), do: :ok
+  defp validate_boolean(key, value), do: {:error, {:invalid_filter, key, value}}
+
+  defp validate_optional_boolean(_key, nil), do: :ok
+  defp validate_optional_boolean(key, value), do: validate_boolean(key, value)
+
+  defp validate_integer(_key, nil), do: :ok
+  defp validate_integer(_key, value) when is_integer(value), do: :ok
+  defp validate_integer(key, value), do: {:error, {:invalid_filter, key, value}}
+
+  defp validate_string_list(_key, nil), do: :ok
+
+  defp validate_string_list(key, values) when is_list(values) and values != [] do
+    if Enum.all?(values, &is_binary/1),
+      do: :ok,
+      else: {:error, {:invalid_filter, key, values}}
+  end
+
+  defp validate_string_list(key, values), do: {:error, {:invalid_filter, key, values}}
+
+  # A roll-up describes a folded card in a depth-bounded tree; without a depth there
+  # is no fold line, and an unbounded roll-up per row is the cost the spec exists
+  # to avoid.
+  defp validate_fold(true, nil), do: {:error, :fold_requires_depth}
+  defp validate_fold(_fold, _depth), do: :ok
+
+  # Keyset and offset paging answer the same question two incompatible ways.
+  defp validate_after(nil, _offset, _order_by), do: :ok
+
+  defp validate_after(_after, offset, _order_by) when not is_nil(offset),
+    do: {:error, :after_with_offset}
+
+  defp validate_after(cursor, nil, order_by) do
+    case Bee.Query.Cursor.decode(cursor, order_by) do
+      {:ok, _values} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp canonical_order([]), do: [id: :asc]
 
   defp canonical_order(order_by) do
@@ -226,4 +352,8 @@ defmodule Bee.Query.Spec do
   defp describe_error({:invalid_include, value}), do: "invalid include: #{inspect(value)}"
   defp describe_error({:invalid_detail, value}), do: "invalid detail: #{inspect(value)}"
   defp describe_error(:invalid_transform), do: "invalid transform"
+  defp describe_error({:invalid_depth, value}), do: "invalid depth: #{inspect(value)}"
+  defp describe_error(:fold_requires_depth), do: "fold requires depth"
+  defp describe_error(:after_with_offset), do: "after and offset are mutually exclusive"
+  defp describe_error({:invalid_cursor, value}), do: "invalid after cursor: #{inspect(value)}"
 end

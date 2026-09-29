@@ -5,11 +5,11 @@ defmodule Bee.Query.Withheld do
 
   @relations [:comments]
 
-  @spec build(Exqlite.Sqlite3.db(), Spec.t(), [map()]) :: {map(), keyword()}
-  def build(conn, %Spec{} = spec, issues) do
+  @spec build(Spec.t(), [map()], map(), String.t() | nil) :: {map(), keyword()}
+  def build(%Spec{} = spec, issues, counts, next) do
     {withheld, refine} = relation_omissions(spec)
     {detail_withheld, detail_refine} = detail_omissions(spec)
-    {limit_withheld, limit_refine} = limit_truncation(conn, spec, issues)
+    {limit_withheld, limit_refine} = limit_truncation(spec, issues, counts, next)
 
     {withheld |> Map.merge(detail_withheld) |> Map.merge(limit_withheld),
      refine ++ detail_refine ++ limit_refine}
@@ -31,12 +31,20 @@ defmodule Bee.Query.Withheld do
     end
   end
 
-  defp limit_truncation(_conn, %Spec{limit: nil}, _issues), do: {%{}, []}
+  defp limit_truncation(%Spec{limit: nil}, _issues, _counts, _next), do: {%{}, []}
 
-  defp limit_truncation(conn, spec, issues) do
-    {:ok, total} =
-      Bee.Store.count_issues(conn, spec |> Spec.to_opts() |> Keyword.drop([:limit, :offset]))
+  # Keyset page: what is withheld is what lies after this page, counted from the
+  # cursor in the same scan as the total; the refinement is the next cursor.
+  defp limit_truncation(%Spec{after: cursor}, issues, %{remaining: remaining}, next)
+       when is_binary(cursor) do
+    omitted = max(remaining - length(issues), 0)
 
+    if omitted > 0 and next,
+      do: {%{limit: omitted}, [after: next]},
+      else: {%{}, []}
+  end
+
+  defp limit_truncation(spec, issues, %{total: total}, _next) do
     offset = spec.offset || 0
     omitted = max(total - offset - length(issues), 0)
 

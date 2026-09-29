@@ -41,6 +41,7 @@ can never fail outside the protocol's declared validation boundary.
 | `{:ready, opts}` | `{:ok, issues}` | none |
 | `{:list, opts}` | `{:ok, issues}` | `{:error, reason}` for invalid boundary options |
 | `{:count, opts}` | `{:ok, count}` | `{:error, reason}` for invalid boundary options |
+| `{:ancestors, id}` | `{:ok, [%{id, title, status, issue_type, project_id}]}`, root first, excluding `id` | `{:error, :not_found}` |
 | `{:tree_page, opts}` | `{:ok, %{roots: roots, issues: issues, total_roots: total_roots}}` | `{:error, reason}` for invalid boundary options |
 | `{:create, title, opts}` | `{:ok, issue}` | none |
 | `{:update, id, attrs}` | `:ok` | `{:error, :not_found \| :self_parent \| :parent_cycle}` |
@@ -57,6 +58,16 @@ can never fail outside the protocol's declared validation boundary.
 | `{:agent_load, agent_id}` | non-negative integer | none |
 | `:bottlenecks` | `[{agent_id, load, project_ids}]` | none |
 | `{:import_jsonl, path}` | `{:ok, imported_count}` | `{:error, reason}` |
+
+`{:count, opts}` also accepts the query spec's filter fields (`:under`,
+`:include_root`, `:depth`, `:labels_any`, `:issue_types`, `:priority_min`,
+`:priority_max`, `:has_children`, `:blocked`); an unknown `:under` replies
+`{:error, {:not_found, id}}`.
+
+The `Bee.query/2`, `Bee.count/2` and `Bee.ancestors/2` facade functions do not send
+these messages when the named Repo's read pool is running: they check out a pooled
+reader in the caller's process, so reads never queue behind the writer. The
+messages remain the node-crossing surface and the fallback, with identical replies.
 
 Boundary validation follows AD-25: `Bee.*` raises `ArgumentError` in its caller for
 structural errors, while raw invalid messages return `{:error, reason}` from

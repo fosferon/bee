@@ -45,7 +45,20 @@ defmodule Bee.Intent.Registry do
       "offset" => spec.offset,
       "include" => Enum.map(spec.include, &Atom.to_string/1),
       "detail" => spec.detail,
-      "transforms" => encode_transforms(spec.transforms)
+      "transforms" => encode_transforms(spec.transforms),
+      "under" => spec.under,
+      "include_root" => spec.include_root,
+      "depth" => spec.depth,
+      "fold" => spec.fold,
+      "path" => spec.path,
+      "keep_ancestors" => spec.keep_ancestors,
+      "labels_any" => spec.labels_any,
+      "issue_types" => spec.issue_types,
+      "priority_min" => spec.priority_min,
+      "priority_max" => spec.priority_max,
+      "has_children" => spec.has_children,
+      "blocked" => spec.blocked,
+      "after" => spec.after
     }
   end
 
@@ -67,7 +80,22 @@ defmodule Bee.Intent.Registry do
         offset: Map.get(encoded, "offset"),
         include: include,
         detail: detail,
-        transforms: transforms
+        transforms: transforms,
+        # Tree and range fields (GC-5834). Intents stored before them decode with
+        # the defaults, so an older saved view reads exactly as it did.
+        under: Map.get(encoded, "under"),
+        include_root: Map.get(encoded, "include_root", false),
+        depth: Map.get(encoded, "depth"),
+        fold: Map.get(encoded, "fold", false),
+        path: Map.get(encoded, "path", false),
+        keep_ancestors: Map.get(encoded, "keep_ancestors", false),
+        labels_any: Map.get(encoded, "labels_any"),
+        issue_types: Map.get(encoded, "issue_types"),
+        priority_min: Map.get(encoded, "priority_min"),
+        priority_max: Map.get(encoded, "priority_max"),
+        has_children: Map.get(encoded, "has_children"),
+        blocked: Map.get(encoded, "blocked"),
+        after: Map.get(encoded, "after")
       )
     end
   end

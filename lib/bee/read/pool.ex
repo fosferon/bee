@@ -38,8 +38,15 @@ defmodule Bee.Read.Pool do
   """
   @spec with_connection(atom(), (Exqlite.Sqlite3.db() -> {:ok, term()} | {:error, term()})) ::
           {:ok, term()} | {:error, term()}
-  def with_connection(lane, fun) when lane in [:fast, :compute] do
-    pool = pool_name(lane)
+  def with_connection(lane, fun) when lane in [:fast, :compute],
+    do: with_connection(__MODULE__, lane, fun)
+
+  @doc """
+  Same as `with_connection/2`, for the pool started under the name `base`.
+  """
+  @spec with_connection(atom(), atom(), (Exqlite.Sqlite3.db() -> term())) :: term()
+  def with_connection(base, lane, fun) when lane in [:fast, :compute] do
+    pool = if lane == :fast, do: fast_pool_name(base), else: compute_pool_name(base)
 
     NimblePool.checkout!(
       pool,
@@ -57,7 +64,4 @@ defmodule Bee.Read.Pool do
 
   def fast_pool_name(base), do: :"#{base}.Fast"
   def compute_pool_name(base), do: :"#{base}.Compute"
-
-  defp pool_name(:fast), do: fast_pool_name(__MODULE__)
-  defp pool_name(:compute), do: compute_pool_name(__MODULE__)
 end

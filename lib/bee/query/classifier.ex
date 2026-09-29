@@ -17,7 +17,20 @@ defmodule Bee.Query.Classifier do
     offset: :fast,
     include: :fast,
     detail: :fast,
-    transforms: :compute
+    transforms: :compute,
+    under: :fast,
+    include_root: :fast,
+    depth: :fast,
+    fold: :fast,
+    path: :fast,
+    keep_ancestors: :fast,
+    labels_any: :fast,
+    issue_types: :fast,
+    priority_min: :fast,
+    priority_max: :fast,
+    has_children: :fast,
+    blocked: :fast,
+    after: :fast
   }
 
   @spec classify(atom()) :: lane()

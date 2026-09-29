@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Parent-tree fields on the composable query (GC-5834): `under` / `include_root`,
+  `depth` (status-scoped when there is no `under`), `fold` (subtree roll-ups that
+  ignore the other filters), `path`, and `keep_ancestors` (context rows).
+- Filters `labels_any`, `issue_types`, `priority_min` / `priority_max`,
+  `has_children`, and `blocked`; `Bee.count/2` accepts them too.
+- Keyset pagination: every query result carries `total` and a `next` cursor, passed
+  back as `after`.
+- `Bee.ancestors/2` and the `{:ancestors, id}` message.
+- Registered intents persist every new field.
+
+### Changed
+
+- `Bee.query/2`, `Bee.count/2` and `Bee.ancestors/2` run on a pooled reader in the
+  caller's process instead of inside the `Bee.Repo` call, so reads never wait behind
+  writes.
+
 ## [0.2.0] - 2026-08-16
 
 ### Added

@@ -49,6 +49,10 @@ defmodule Bee.Query.Projection do
     ]
   }
 
+  # Tree fields (GC-5834) are present only when the spec asked for them, so they
+  # pass through whatever the detail level.
+  @tree_fields [:depth, :rollup, :path, :context]
+
   @spec project([map()], Bee.Query.Spec.t()) :: [map()]
   def project(issues, spec), do: Enum.map(issues, &project_issue(&1, spec))
 
@@ -57,6 +61,7 @@ defmodule Bee.Query.Projection do
 
     issue
     |> Map.take(fields)
+    |> Map.merge(Map.take(issue, @tree_fields))
     |> Map.merge(relations(issue, spec))
   end
 
