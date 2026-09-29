@@ -225,7 +225,16 @@ defmodule Bee.Repo do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         lane = Bee.Query.Classifier.classify(:list)
-        result = read_with_pool(state, lane, fn conn -> Bee.Store.list_issues(conn, opts) end)
+
+        # `under` must be resolved here as it is for count/query: unresolved, a bare
+        # integer reaches build_scope/1 with no matching clause (GC-5834 audit F1).
+        result =
+          read_with_pool(state, lane, fn conn ->
+            with {:ok, opts} <- Bee.Store.resolve_under(conn, opts, state.prefix) do
+              Bee.Store.list_issues(conn, opts)
+            end
+          end)
+
         {:reply, result, state}
 
       {:error, reason} ->

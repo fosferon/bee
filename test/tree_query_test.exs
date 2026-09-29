@@ -111,6 +111,20 @@ defmodule Bee.TreeQueryTest do
       assert {:error, {:not_found, "test-999"}} = Bee.query([under: "test-999"], s)
       assert {:error, {:not_found, 999}} = Bee.count([under: 999], s)
     end
+
+    test "list resolves under like query and count, in every id form", %{server: s} do
+      t = tree(s)
+      order = [order_by: [id: :asc]]
+      {:ok, expected} = Bee.query([under: t.epic] ++ order, s)
+
+      for under <- [t.epic, "#{t.epic}", "test-#{t.epic}"] do
+        assert {:ok, issues} = Bee.list([under: under] ++ order, s)
+        assert Enum.map(issues, & &1.id) == ids(expected)
+      end
+
+      assert {:error, {:not_found, 999}} = Bee.list([under: 999], s)
+      assert Process.alive?(GenServer.whereis(s))
+    end
   end
 
   describe "depth without under" do
