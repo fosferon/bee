@@ -90,6 +90,7 @@ defmodule Bee.Supervisor do
                name: repo_name,
                start_pool?: false,
                skip_migration?: true,
+               lane_write_fence: Keyword.get(opts, :lane_write_fence, false),
                pool_name: pool_name
              ]
            ]},

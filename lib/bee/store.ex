@@ -179,41 +179,48 @@ defmodule Bee.Store do
     get_issue(conn, id)
   end
 
-  @spec upsert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()}
+  @spec upsert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()} | {:error, term()}
   def upsert_issue(conn, attrs) do
     id = Map.fetch!(attrs, :id)
 
     sql = """
-    INSERT OR REPLACE INTO issues (id, title, description, status, priority, issue_type,
+    INSERT INTO issues (id, title, description, status, priority, issue_type,
                         project_id, assigned_to, parent, created_at, created_by, updated_at,
                         closed_at, close_reason)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description,
+      status=excluded.status, priority=excluded.priority, issue_type=excluded.issue_type,
+      project_id=excluded.project_id, assigned_to=excluded.assigned_to,
+      parent=excluded.parent, updated_at=excluded.updated_at,
+      closed_at=excluded.closed_at, close_reason=excluded.close_reason
     """
 
-    exec(conn, sql, [
-      id,
-      Map.fetch!(attrs, :title),
-      Map.get(attrs, :description),
-      Map.get(attrs, :status, "open"),
-      Map.get(attrs, :priority),
-      Map.get(attrs, :issue_type, "task"),
-      Map.get(attrs, :project_id),
-      Map.get(attrs, :assigned_to),
-      Map.get(attrs, :parent),
-      Map.get(attrs, :created_at, now_iso()),
-      Map.get(attrs, :created_by),
-      now_iso(),
-      Map.get(attrs, :closed_at),
-      Map.get(attrs, :close_reason)
-    ])
-
-    # Replace labels: delete existing, insert new
-    exec(conn, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
-
-    labels = Map.get(attrs, :labels, [])
-    Enum.each(labels, fn label -> insert_label(conn, id, label) end)
-
-    get_issue(conn, id)
+    with :ok <-
+           exec(conn, sql, [
+             id,
+             Map.fetch!(attrs, :title),
+             Map.get(attrs, :description),
+             Map.get(attrs, :status, "open"),
+             Map.get(attrs, :priority),
+             Map.get(attrs, :issue_type, "task"),
+             Map.get(attrs, :project_id),
+             Map.get(attrs, :assigned_to),
+             Map.get(attrs, :parent),
+             Map.get(attrs, :created_at) || now_iso(),
+             Map.get(attrs, :created_by),
+             now_iso(),
+             Map.get(attrs, :closed_at),
+             Map.get(attrs, :close_reason)
+           ]),
+         :ok <- exec(conn, "DELETE FROM issue_labels WHERE issue_id = ?", [id]),
+         :ok <-
+           Enum.reduce_while(Map.get(attrs, :labels, []), :ok, fn label, :ok ->
+             case insert_label(conn, id, label) do
+               :ok -> {:cont, :ok}
+               {:error, _} = error -> {:halt, error}
+             end
+           end),
+         do: get_issue(conn, id)
   end
 
   @spec get_issue(Exqlite.Sqlite3.db(), String.t(), keyword()) ::

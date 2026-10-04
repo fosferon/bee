@@ -93,6 +93,7 @@ defmodule Bee.Repo do
            alloc_graph: alloc_graph,
            prefix: prefix,
            jsonl_path: jsonl_path,
+           lane_write_fence: Keyword.get(opts, :lane_write_fence, false),
            export_mode: :on_write,
            db_path: db_path,
            pool_pid: pool_pid,
@@ -107,11 +108,82 @@ defmodule Bee.Repo do
 
   # --- GenServer calls ---
 
-  @doc false
   @impl true
-  def handle_call(:conn, _from, state), do: {:reply, state.conn, state}
+  def handle_call({:mutate_lane_issue, attrs, check}, _from, state) do
+    result =
+      with :ok <- Bee.Store.LaneMutation.validate(attrs),
+           do:
+             transaction(state.conn, fn ->
+               with :ok <-
+                      Bee.Store.LaneMutation.authorize(check, attrs.principal_ref, attrs.lane_id),
+                    do: Bee.Store.LaneMutation.apply_command(state.conn, attrs)
+             end)
 
-  def handle_call({:create, title, opts}, _from, state) do
+    case result do
+      {:ok, %{replayed: false} = result} ->
+        if attrs.action == "assign",
+          do: Bee.World.assign(state.alloc_graph, attrs.issue_id, attrs.body["agent_id"])
+
+        {:reply, {:ok, result}, schedule_export(state)}
+
+      {:ok, _} = result ->
+        {:reply, result, state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:reconcile_lane_mutation, command, principal, lane, check}, _from, state) do
+    result =
+      with :ok <- Bee.Store.LaneMutation.validate_reconciliation(command, principal, lane),
+           :ok <- Bee.Store.LaneMutation.authorize(check, principal, lane),
+           {:ok, %{receipt: %{lane_id: ^lane}}} = result <-
+             Bee.Store.LaneMutation.reconcile(state.conn, command, principal),
+           do: result
+
+    result =
+      case result do
+        {:ok, %{receipt: %{lane_id: ^lane}}} = found -> found
+        {:ok, _} -> {:error, :non_disclosing_conflict}
+        {:error, _} = error -> error
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:lane_write_fence_status, _from, state),
+    do: {:reply, {:ok, if(state.lane_write_fence, do: :enabled, else: :disabled)}, state}
+
+  def handle_call({:classify_lane_write, request}, _from, state) do
+    {:reply, Bee.Store.LaneWriteFence.classify(state.conn, request, state.prefix), state}
+  end
+
+  def handle_call({op, _}, _from, state) when op in [:import_entries, :sweep_expired_targets],
+    do: {:reply, {:error, :private_owner_message}, state}
+
+  def handle_call(request, from, %{lane_write_fence: false} = state),
+    do: handle_request(request, from, state)
+
+  def handle_call(:conn, _from, state), do: {:reply, {:error, :owner_connection_private}, state}
+
+  def handle_call({:associate_lane_issue, _} = request, from, state),
+    do: handle_request(request, from, state)
+
+  def handle_call(request, from, state) do
+    if Bee.Store.LaneWriteFence.read?(request) do
+      handle_request(request, from, state)
+    else
+      case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
+        {:ok, prepared} -> handle_request(prepared, from, state)
+        {:error, _} = error -> {:reply, error, state}
+      end
+    end
+  end
+
+  defp handle_request(:conn, _from, state), do: {:reply, state.conn, state}
+
+  defp handle_request({:create, title, opts}, _from, state) do
     result =
       transaction(state.conn, fn ->
         id = Bee.Id.next(state.conn, state.prefix)
@@ -165,14 +237,14 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:get, id}, _from, state) do
+  defp handle_request({:get, id}, _from, state) do
     full = resolve_id(id, state.prefix)
     lane = Bee.Query.Classifier.classify(:get)
     result = read_with_pool(state, lane, fn conn -> Bee.Store.get_issue(conn, full) end)
     {:reply, result, state}
   end
 
-  def handle_call({:associate_lane_issue, attrs}, _from, state) do
+  defp handle_request({:associate_lane_issue, attrs}, _from, state) do
     if Bee.Store.LaneAssociation.valid?(attrs) and
          String.starts_with?(attrs.issue_id, state.prefix <> "-") and
          match?({:ok, id} when id > 0, Bee.Id.parse(attrs.issue_id)) do
@@ -190,7 +262,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:reconcile_lane_issue, command_id}, _from, state) do
+  defp handle_request({:reconcile_lane_issue, command_id}, _from, state) do
     result =
       if is_binary(command_id) and byte_size(command_id) in 1..256 do
         Bee.Store.LaneAssociation.reconcile(state.conn, command_id)
@@ -201,7 +273,7 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:get, id, opts}, _from, state) do
+  defp handle_request({:get, id, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         full = resolve_id(id, state.prefix)
@@ -214,14 +286,14 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:get_comments, id}, _from, state) do
+  defp handle_request({:get_comments, id}, _from, state) do
     full = resolve_id(id, state.prefix)
     lane = Bee.Query.Classifier.classify(:get_comments)
     result = read_with_pool(state, lane, fn conn -> {:ok, Bee.Store.get_comments(conn, full)} end)
     {:reply, result, state}
   end
 
-  def handle_call({:list, opts}, _from, state) do
+  defp handle_request({:list, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         lane = Bee.Query.Classifier.classify(:list)
@@ -242,7 +314,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:count, opts}, _from, state) do
+  defp handle_request({:count, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         lane = Bee.Query.Classifier.classify(:count)
@@ -254,7 +326,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:query, spec}, _from, state) do
+  defp handle_request({:query, spec}, _from, state) do
     case Bee.Query.Spec.new(spec) do
       {:ok, spec} ->
         lane = Bee.Query.Classifier.classify(spec)
@@ -271,12 +343,12 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:ancestors, id}, _from, state) do
+  defp handle_request({:ancestors, id}, _from, state) do
     result = read_with_pool(state, :fast, &ancestors(&1, id, state.prefix))
     {:reply, result, state}
   end
 
-  def handle_call({:ask, intent, opts}, _from, state) do
+  defp handle_request({:ask, intent, opts}, _from, state) do
     result =
       with {:ok, spec} <- resolve_intent(state.conn, intent, opts) do
         lane = Bee.Query.Classifier.classify(spec)
@@ -291,22 +363,22 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:register_intent, name, spec}, _from, state) do
+  defp handle_request({:register_intent, name, spec}, _from, state) do
     result = Bee.Intent.Registry.register(state.conn, name, spec)
     {:reply, result, state}
   end
 
-  def handle_call({:remove_intent, name}, _from, state) do
+  defp handle_request({:remove_intent, name}, _from, state) do
     result = Bee.Intent.Registry.remove(state.conn, name)
     {:reply, result, state}
   end
 
-  def handle_call(:list_intents, _from, state) do
+  defp handle_request(:list_intents, _from, state) do
     result = read_with_pool(state, :fast, &Bee.Intent.Registry.list/1)
     {:reply, result, state}
   end
 
-  def handle_call({:register_measure, name, unit, opts}, _from, state) do
+  defp handle_request({:register_measure, name, unit, opts}, _from, state) do
     result =
       transaction(state.conn, fn ->
         case Bee.Store.Measurements.register(state.conn, name, unit, opts) do
@@ -321,7 +393,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:measure, issue_id, attrs}, _from, state) do
+  defp handle_request({:measure, issue_id, attrs}, _from, state) do
     full = resolve_id(issue_id, state.prefix)
 
     result =
@@ -345,12 +417,12 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call(:list_measures, _from, state) do
+  defp handle_request(:list_measures, _from, state) do
     result = read_with_pool(state, :fast, &Bee.Store.Measurements.list_registered/1)
     {:reply, result, state}
   end
 
-  def handle_call({:tree_page, opts}, _from, state) do
+  defp handle_request({:tree_page, opts}, _from, state) do
     case Bee.Store.validate_opts(opts) do
       :ok ->
         lane = Bee.Query.Classifier.classify(:tree_page)
@@ -362,7 +434,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:ready, opts}, _from, state) do
+  defp handle_request({:ready, opts}, _from, state) do
     result =
       with {:ok, spec} <-
              opts
@@ -377,7 +449,7 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:update, id, attrs}, _from, state) do
+  defp handle_request({:update, id, attrs}, _from, state) do
     full = resolve_id(id, state.prefix)
 
     case normalize_update_attrs(attrs, full, state) do
@@ -425,7 +497,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:comment, id, text, opts}, _from, state) do
+  defp handle_request({:comment, id, text, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
 
     result =
@@ -446,11 +518,11 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:block, id, blocker_id}, _from, state) do
+  defp handle_request({:block, id, blocker_id}, _from, state) do
     block_dependency(id, blocker_id, :blocks, state)
   end
 
-  def handle_call({:block, id, blocker_id, opts}, _from, state) when is_list(opts) do
+  defp handle_request({:block, id, blocker_id, opts}, _from, state) when is_list(opts) do
     if Keyword.keyword?(opts) do
       case Keyword.fetch(opts, :type) do
         {:ok, type} -> block_dependency(id, blocker_id, type, state)
@@ -461,10 +533,10 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:block, _id, _blocker_id, _opts}, _from, state),
+  defp handle_request({:block, _id, _blocker_id, _opts}, _from, state),
     do: {:reply, {:error, :unknown_dep_type}, state}
 
-  def handle_call({:traverse, id, opts}, _from, state) when is_list(opts) do
+  defp handle_request({:traverse, id, opts}, _from, state) when is_list(opts) do
     full_id = resolve_id(id, state.prefix)
 
     result =
@@ -477,10 +549,10 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:traverse, _id, _opts}, _from, state),
+  defp handle_request({:traverse, _id, _opts}, _from, state),
     do: {:reply, {:error, :invalid_spec}, state}
 
-  def handle_call({:candidates, id}, _from, state) do
+  defp handle_request({:candidates, id}, _from, state) do
     full_id = resolve_id(id, state.prefix)
 
     result =
@@ -489,11 +561,11 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:unblock, id, blocker_id}, _from, state) do
+  defp handle_request({:unblock, id, blocker_id}, _from, state) do
     unblock_dependency(id, blocker_id, :blocks, state)
   end
 
-  def handle_call({:unblock, id, blocker_id, opts}, _from, state) when is_list(opts) do
+  defp handle_request({:unblock, id, blocker_id, opts}, _from, state) when is_list(opts) do
     if Keyword.keyword?(opts) do
       case Keyword.fetch(opts, :type) do
         {:ok, type} -> unblock_dependency(id, blocker_id, type, state)
@@ -504,10 +576,10 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:unblock, _id, _blocker_id, _opts}, _from, state),
+  defp handle_request({:unblock, _id, _blocker_id, _opts}, _from, state),
     do: {:reply, {:error, :unknown_dep_type}, state}
 
-  def handle_call({:lock, id, opts}, _from, state) do
+  defp handle_request({:lock, id, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
 
     result =
@@ -536,7 +608,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:unlock, id}, _from, state) do
+  defp handle_request({:unlock, id}, _from, state) do
     full = resolve_id(id, state.prefix)
 
     result =
@@ -564,7 +636,7 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:register_project, id, attrs}, _from, state) do
+  defp handle_request({:register_project, id, attrs}, _from, state) do
     result =
       transaction(state.conn, fn ->
         with {:ok, attrs} <- normalize_metadata(attrs),
@@ -583,23 +655,23 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:register_agent, id, attrs}, _from, state) do
+  defp handle_request({:register_agent, id, attrs}, _from, state) do
     result = Bee.Agents.insert_agent(state.conn, id, attrs)
     Bee.World.add_agent(state.alloc_graph, id)
     {:reply, result, state}
   end
 
-  def handle_call(:list_projects, _from, state) do
+  defp handle_request(:list_projects, _from, state) do
     result = read_with_pool(state, :fast, &Bee.Agents.list_projects/1)
     {:reply, result, state}
   end
 
-  def handle_call(:list_agents, _from, state) do
+  defp handle_request(:list_agents, _from, state) do
     result = read_with_pool(state, :fast, &Bee.Agents.list_agents/1)
     {:reply, result, state}
   end
 
-  def handle_call({:assign, issue_id, agent_id}, _from, state) do
+  defp handle_request({:assign, issue_id, agent_id}, _from, state) do
     full = resolve_id(issue_id, state.prefix)
 
     result =
@@ -632,23 +704,23 @@ defmodule Bee.Repo do
     end
   end
 
-  def handle_call({:join_project, agent_id, project_id}, _from, state) do
+  defp handle_request({:join_project, agent_id, project_id}, _from, state) do
     Bee.Agents.add_project_agent(state.conn, project_id, agent_id)
     Bee.World.join_project(state.alloc_graph, agent_id, project_id)
     {:reply, :ok, state}
   end
 
-  def handle_call(:who_blocks_whom, _from, state) do
+  defp handle_request(:who_blocks_whom, _from, state) do
     result = read_with_pool(state, :compute, &Bee.Graph.Allocation.who_blocks_whom/1)
     {:reply, result, state}
   end
 
-  def handle_call({:agent_load, agent_id}, _from, state) do
+  defp handle_request({:agent_load, agent_id}, _from, state) do
     result = read_with_pool(state, :compute, &Bee.Graph.Allocation.agent_load(&1, agent_id))
     {:reply, result, state}
   end
 
-  def handle_call(:critical_path, _from, state) do
+  defp handle_request(:critical_path, _from, state) do
     result =
       read_with_pool(state, :compute, fn conn ->
         {:ok, conn |> Bee.Store.Deps.critical_path() |> Enum.map(&Bee.Id.parse!/1)}
@@ -657,7 +729,7 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:critical_path, opts}, _from, state) when is_list(opts) do
+  defp handle_request({:critical_path, opts}, _from, state) when is_list(opts) do
     opts =
       case Keyword.get(opts, :root) do
         nil -> opts
@@ -675,33 +747,67 @@ defmodule Bee.Repo do
     {:reply, result, state}
   end
 
-  def handle_call({:critical_path, _opts}, _from, state),
+  defp handle_request({:critical_path, _opts}, _from, state),
     do: {:reply, {:error, :invalid_spec}, state}
 
-  def handle_call({:rollup, id, opts}, _from, state) do
+  defp handle_request({:rollup, id, opts}, _from, state) do
     full = resolve_id(id, state.prefix)
     result = read_with_pool(state, :compute, &Bee.Graph.Rollup.compute(&1, full, opts))
     {:reply, result, state}
   end
 
-  def handle_call(:bottlenecks, _from, state) do
+  defp handle_request(:bottlenecks, _from, state) do
     result = read_with_pool(state, :compute, &Bee.Graph.Allocation.bottlenecks/1)
     {:reply, result, state}
   end
 
-  def handle_call({:import_jsonl, path}, _from, state) do
-    result = Bee.Export.import_jsonl(state.conn, path, state.prefix)
-    Bee.Graph.rebuild(state.dep_graph, state.conn)
-    Bee.World.rebuild(state.alloc_graph, state.conn)
-    state = schedule_export(state)
-    {:reply, result, state}
+  defp handle_request({:import_entries, entries}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        Bee.Export.import_entries(state.conn, entries, state.prefix)
+      end)
+
+    case result do
+      {:ok, count} ->
+        Bee.Graph.rebuild(state.dep_graph, state.conn)
+        Bee.World.rebuild(state.alloc_graph, state.conn)
+        {:reply, {:ok, count}, schedule_export(state)}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
-  def handle_call(:prefix, _from, state), do: {:reply, state.prefix, state}
+  defp handle_request({:import_jsonl, path}, from, state) do
+    case Bee.Export.read_entries(path) do
+      {:ok, entries} -> handle_request({:import_entries, entries}, from, state)
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
 
-  def handle_call(:sweep_expired_locks, _from, state) do
+  defp handle_request(:prefix, _from, state), do: {:reply, state.prefix, state}
+
+  defp handle_request({:sweep_expired_targets, ids}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        Enum.reduce_while(ids, {:ok, 0}, fn id, {:ok, count} ->
+          case Bee.Lock.release(state.conn, id) do
+            :ok -> {:cont, {:ok, count + 1}}
+            {:error, _} = error -> {:halt, error}
+          end
+        end)
+      end)
+
+    case result do
+      {:ok, count} -> {:reply, count, schedule_export(state)}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  defp handle_request(:sweep_expired_locks, _from, state) do
     # Story 3.5: Sweeper dispatches through the writer (no own connection).
-    # One event per expired lock, release + event in one transaction.
+    # Bee.Lock.sweep_expired/1 emits no command events; preserve that legacy
+    # contract. The opt-in fence qualifies and freezes the selected target set.
     swept = Bee.Lock.sweep_expired(state.conn)
     state = schedule_export(state)
     {:reply, swept, state}

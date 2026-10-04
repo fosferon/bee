@@ -97,7 +97,8 @@ defmodule Bee.Store.Migrate do
       migration_004(),
       migration_005(),
       migration_006(),
-      migration_007()
+      migration_007(),
+      migration_008()
     ]
 
   @spec migration_000() :: migration()
@@ -123,6 +124,12 @@ defmodule Bee.Store.Migrate do
 
   @spec migration_007() :: migration()
   def migration_007, do: {8, :add_lane_issue_associations, &add_lane_issue_associations/1}
+
+  @spec migration_008() :: migration()
+  def migration_008,
+    do:
+      {9, :add_lane_mutation_receipts,
+       fn conn -> execute(conn, Bee.Store.LaneMutation.schema()) end}
 
   defp add_lane_issue_associations(conn) do
     [

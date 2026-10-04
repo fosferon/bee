@@ -307,7 +307,7 @@ defmodule Bee.Store.MigrateTest do
   test "migration 002 adds issues.metadata column with NOT NULL DEFAULT", %{conn: conn} do
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 8} = Migrate.user_version(conn)
+    assert {:ok, 9} = Migrate.user_version(conn)
     assert column_exists?(conn, "issues", "metadata")
     assert "TEXT" == column_type(conn, "issues", "metadata")
     assert "'{}'" == column_default(conn, "issues", "metadata")
@@ -321,7 +321,7 @@ defmodule Bee.Store.MigrateTest do
 
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 8} = Migrate.user_version(conn)
+    assert {:ok, 9} = Migrate.user_version(conn)
     assert table_exists?(conn, "events")
     assert column_exists?(conn, "events", "event_type")
     assert column_exists?(conn, "events", "payload")
@@ -411,7 +411,7 @@ defmodule Bee.Store.MigrateTest do
 
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 8} = Migrate.user_version(conn)
+    assert {:ok, 9} = Migrate.user_version(conn)
     assert 1 == scalar(conn, "SELECT COUNT(*) FROM dependencies")
     assert ["GC-2"] == dependency_targets(conn, "GC-1")
     assert index_exists?(conn, "idx_dependencies_reverse")
@@ -432,11 +432,12 @@ defmodule Bee.Store.MigrateTest do
              )
   end
 
-  test "full migration ladder reaches version 8 on a fresh database", %{conn: conn} do
+  test "full migration ladder reaches version 9 on a fresh database", %{conn: conn} do
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
-    assert {:ok, 8} = Migrate.user_version(conn)
+    assert {:ok, 9} = Migrate.user_version(conn)
     assert table_exists?(conn, "lane_issue_links")
     assert table_exists?(conn, "lane_issue_receipts")
+    assert table_exists?(conn, "lane_mutation_receipts")
     assert table_exists?(conn, "events")
     assert table_exists?(conn, "measurements")
     assert table_exists?(conn, "intents")

@@ -39,6 +39,27 @@ defmodule Bee do
 
   @default_server Bee.Repo
 
+  @doc "Owner cutover status; diagnostic only, never an admission permit."
+  def lane_write_fence_status(server \\ Bee.Repo),
+    do: GenServer.call(server, :lane_write_fence_status)
+
+  @doc "Internal admitted lane issue mutation; caller admission is rechecked inside the owner transaction."
+  def mutate_lane_issue(attrs, admission_check, server \\ Bee.Repo),
+    do: GenServer.call(server, {:mutate_lane_issue, attrs, admission_check}, :infinity)
+
+  @doc "Authenticated owner receipt/current-state read; missing receipt is not an abandonment proof."
+  def reconcile_lane_mutation(command, principal, lane, admission_check, server \\ Bee.Repo),
+    do:
+      GenServer.call(
+        server,
+        {:reconcile_lane_mutation, command, principal, lane, admission_check},
+        :infinity
+      )
+
+  @doc "Bee-owned diagnostic target classification; not a mutation permit."
+  def classify_lane_write(request, server \\ Bee.Repo),
+    do: GenServer.call(server, {:classify_lane_write, request})
+
   @doc """
   Fetches a single issue by id. Returns `{:ok, issue}` or `{:error, :not_found}`.
 

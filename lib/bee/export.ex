@@ -91,73 +91,126 @@ defmodule Bee.Export do
 
   @spec import_jsonl(Exqlite.Sqlite3.db(), String.t(), String.t()) :: {:ok, integer()}
   def import_jsonl(conn, path, prefix) do
-    case File.read(path) do
-      {:ok, content} ->
-        lines =
-          content
-          |> String.split("\n", trim: true)
-          |> Enum.map(&Jason.decode!/1)
+    with {:ok, entries} <- read_entries(path), do: import_entries(conn, entries, prefix)
+  end
 
-        max_num =
-          Enum.reduce(lines, 0, fn data, acc ->
-            num = extract_num(Map.get(data, "id", ""))
-            max(acc, num)
-          end)
+  def read_entries(path) do
+    with {:ok, content} <- File.read(path) do
+      content
+      |> String.split("\n", trim: true)
+      |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
+        case Jason.decode(line) do
+          {:ok, data} when is_map(data) ->
+            if valid_entry?(data),
+              do: {:cont, {:ok, [data | acc]}},
+              else: {:halt, {:error, :invalid_import}}
 
-        # idempotent import via upsert — re-importing the same
-        # trail changes nothing (Story 3.4, FR16).
-        Enum.each(lines, fn data ->
-          id = Map.get(data, "id")
-
-          attrs = %{
-            id: id,
-            title: Map.get(data, "title"),
-            description: Map.get(data, "description"),
-            status: Map.get(data, "status", "open"),
-            priority: Map.get(data, "priority"),
-            issue_type: Map.get(data, "issue_type", "task"),
-            project_id: Map.get(data, "project_id"),
-            assigned_to: Map.get(data, "assigned_to"),
-            labels: Map.get(data, "labels", []),
-            created_at: Map.get(data, "created_at"),
-            created_by: Map.get(data, "created_by"),
-            closed_at: Map.get(data, "closed_at"),
-            close_reason: Map.get(data, "close_reason")
-          }
-
-          {:ok, _} = Bee.Store.upsert_issue(conn, attrs)
-
-          # Replace comments: delete existing, insert from JSONL
-          Bee.Store.delete_comments(conn, id)
-
-          Enum.each(Map.get(data, "comments", []), fn c ->
-            Bee.Store.insert_comment(conn, id, Map.get(c, "text", ""),
-              author: Map.get(c, "author")
-            )
-          end)
-
-          Enum.each(Map.get(data, "dependencies", []), fn dep ->
-            depends_on = Map.get(dep, "depends_on_id")
-
-            with true <- is_binary(depends_on),
-                 {:ok, type} <-
-                   Bee.Dependency.Type.from_storage_name(Map.get(dep, "type", "blocks")) do
-              Bee.Store.insert_dependency(conn, id, depends_on, type)
-            else
-              false -> :ok
-              {:error, _reason} -> :ok
-            end
-          end)
-        end)
-
-        if max_num > 0, do: Bee.Id.set(conn, prefix, max_num)
-
-        {:ok, length(lines)}
-
-      {:error, reason} ->
-        {:error, reason}
+          _ ->
+            {:halt, {:error, :invalid_import}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _} = error -> error
+      end
     end
   end
+
+  defp valid_entry?(data) do
+    is_binary(data["id"]) and is_binary(data["title"]) and data["title"] != "" and
+      Enum.all?(
+        ~w(description status issue_type project_id assigned_to created_at created_by closed_at close_reason),
+        fn key -> is_nil(data[key]) or is_binary(data[key]) end
+      ) and
+      (is_nil(data["priority"]) or is_integer(data["priority"])) and
+      (is_nil(data["parent"]) or is_binary(data["parent"])) and
+      is_list(Map.get(data, "labels", [])) and
+      Enum.all?(Map.get(data, "labels", []), &is_binary/1) and
+      is_list(Map.get(data, "comments", [])) and
+      Enum.all?(Map.get(data, "comments", []), fn c ->
+        is_map(c) and is_binary(Map.get(c, "text", "")) and
+          (is_nil(c["author"]) or is_binary(c["author"]))
+      end) and
+      is_list(Map.get(data, "dependencies", [])) and
+      Enum.all?(Map.get(data, "dependencies", []), fn d ->
+        is_map(d) and is_binary(d["depends_on_id"]) and is_binary(Map.get(d, "type", "blocks"))
+      end)
+  end
+
+  def import_entries(conn, lines, prefix) do
+    max_num =
+      Enum.reduce(lines, 0, fn data, acc ->
+        num = extract_num(Map.get(data, "id", ""))
+        max(acc, num)
+      end)
+
+    with :ok <-
+           Enum.reduce_while(lines, :ok, fn data, :ok ->
+             case import_entry(conn, data) do
+               :ok -> {:cont, :ok}
+               {:error, _} = error -> {:halt, error}
+             end
+           end),
+         :ok <- if(max_num > 0, do: Bee.Id.set(conn, prefix, max_num), else: :ok) do
+      {:ok, length(lines)}
+    end
+  end
+
+  defp import_entry(conn, data) do
+    id = Map.get(data, "id")
+
+    attrs = %{
+      id: id,
+      title: data["title"],
+      description: data["description"],
+      status: Map.get(data, "status", "open"),
+      priority: data["priority"],
+      issue_type: Map.get(data, "issue_type", "task"),
+      project_id: data["project_id"],
+      assigned_to: data["assigned_to"],
+      labels: Map.get(data, "labels", []),
+      parent: data["parent"],
+      created_at: data["created_at"],
+      created_by: data["created_by"],
+      closed_at: data["closed_at"],
+      close_reason: data["close_reason"]
+    }
+
+    with {:ok, _} <- Bee.Store.upsert_issue(conn, attrs),
+         :ok <- Bee.Store.delete_comments(conn, id),
+         :ok <- import_comments(conn, id, Map.get(data, "comments", [])),
+         :ok <- import_dependencies(conn, id, Map.get(data, "dependencies", [])),
+         do: :ok
+  end
+
+  defp import_comments(conn, id, comments) when is_list(comments) do
+    Enum.reduce_while(comments, :ok, fn comment, :ok ->
+      case Bee.Store.insert_comment(conn, id, Map.get(comment, "text", ""),
+             author: Map.get(comment, "author")
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp import_comments(_, _, _), do: {:error, :invalid_import}
+
+  defp import_dependencies(conn, id, dependencies) when is_list(dependencies) do
+    Enum.reduce_while(dependencies, :ok, fn dep, :ok ->
+      result =
+        with true <- is_binary(dep["depends_on_id"]) or {:error, :invalid_import},
+             {:ok, type} <- Bee.Dependency.Type.from_storage_name(Map.get(dep, "type", "blocks")),
+             do: Bee.Store.insert_dependency(conn, id, dep["depends_on_id"], type)
+
+      case result do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp import_dependencies(_, _, _), do: {:error, :invalid_import}
 
   defp extract_num(id) do
     case Bee.Id.parse(id) do

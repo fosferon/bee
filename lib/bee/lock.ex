@@ -46,7 +46,6 @@ defmodule Bee.Lock do
   @spec release(Exqlite.Sqlite3.db(), String.t()) :: :ok
   def release(conn, issue_id) do
     run_sql(conn, "DELETE FROM locks WHERE issue_id = ?", [issue_id])
-    :ok
   end
 
   @spec get(Exqlite.Sqlite3.db(), String.t()) :: map() | nil
