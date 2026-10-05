@@ -82,15 +82,16 @@ defmodule Bee.Store.LaneWriteFence do
         prefix
       )
 
-  defp targets(conn, {:upsert_project_registry, project, _, _} = request, prefix),
-    do:
-      queried_targets(
-        conn,
-        "SELECT id FROM issues WHERE project_id = ?",
-        [project],
-        request,
-        prefix
-      )
+  defp targets(conn, {:upsert_project_registry, project, _, _} = request, prefix)
+       when is_binary(project) and byte_size(project) in 1..256,
+       do:
+         queried_targets(
+           conn,
+           "SELECT id FROM issues WHERE project_id = ?",
+           [project],
+           request,
+           prefix
+         )
 
   defp targets(conn, {:backfill_projects, rows, run_id, now}, prefix)
        when is_list(rows) and is_binary(run_id) and is_binary(now) do

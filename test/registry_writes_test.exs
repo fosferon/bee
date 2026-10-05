@@ -129,6 +129,46 @@ defmodule Bee.RegistryWritesTest do
              )
   end
 
+  test "malformed bulk IDs return typed errors without killing either owner mode", ctx do
+    unfenced =
+      start_supervised!(
+        {Bee.Repo,
+         db_path: ctx.db <> ".unfenced",
+         prefix: "GC",
+         jsonl_path: nil,
+         name: Bee.UnfencedRegistryProbe},
+        id: :unfenced
+      )
+
+    for repo <- [ctx.repo, unfenced], id <- [nil, %{}, [], 42, ""] do
+      assert {:error, _} = Bee.upsert_project_registry(id, %{}, nil, repo)
+      assert Process.alive?(repo)
+    end
+
+    for repo <- [ctx.repo, unfenced], id <- ["", "bad", "GC-", "OTHER-1", -1, nil, %{}] do
+      assert {:error, _} =
+               Bee.backfill_projects(
+                 [%{id: id, project_id: "p", rule: "probe"}],
+                 "probe",
+                 DateTime.utc_now() |> DateTime.to_iso8601(),
+                 repo
+               )
+
+      assert Process.alive?(repo)
+    end
+  end
+
+  test "racing initial project snapshots cannot overwrite the winner", %{repo: repo} do
+    results =
+      Enum.map(["First", "Second"], fn name ->
+        Task.async(fn -> Bee.upsert_project_registry("p", entry("p", name), nil, repo) end)
+      end)
+      |> Enum.map(&Task.await/1)
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :project_version_conflict})) == 1
+  end
+
   test "legacy issue update propagates column and label failures", %{repo: repo, db: db} do
     assert {:ok, issue} = Bee.create("Before", [labels: ["old"]], repo)
 

@@ -62,8 +62,8 @@ defmodule Bee.Store.RegistryWrites do
         with :ok <-
                run(
                  conn,
-                 "UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ? AND (project_id IS NULL OR trim(project_id) = '')",
-                 [row.project_id, now, id]
+                 "UPDATE issues SET project_id = ? WHERE id = ? AND (project_id IS NULL OR trim(project_id) = '')",
+                 [row.project_id, id]
                ),
              {:ok, [[changed]]} <- query(conn, "SELECT changes()", []) do
           if changed == 0 do
@@ -103,8 +103,12 @@ defmodule Bee.Store.RegistryWrites do
       end)
   end
 
-  defp valid_id?(id, prefix) when is_binary(id) or is_integer(id),
-    do: match?({:ok, n} when n > 0, Bee.Id.parse(Bee.Id.to_prefixed(id, prefix)))
+  defp valid_id?(id, prefix) when is_binary(id) or is_integer(id) do
+    full = Bee.Id.to_prefixed(id, prefix)
+    String.starts_with?(full, prefix <> "-") and match?({:ok, n} when n > 0, Bee.Id.parse(full))
+  rescue
+    _ in ArgumentError -> false
+  end
 
   defp valid_id?(_, _), do: false
 

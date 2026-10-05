@@ -68,3 +68,14 @@ conflicts, project fence rejection, all-target bulk rejection, audit rollback,
 and column/label failure rollback. Standalone suite: 255 tests, zero failures,
 one existing performance exclusion; seed 430745. These changes remain local,
 unpublished, and require independent extension review and consumer verification.
+
+Consumer compatibility check: bulk backfill preserves the original issue updated_at,
+as required by the existing wire fixture. The new owned event and audit log carry
+the backfill time; unrelated issue timestamps are not rewritten.
+Independent edge review found malformed IDs could reach a SQL bind in fenced
+project writes, or raise in default-mode backfills. The project classifier now
+checks binary/nonempty bounds before binding; bulk ID validation handles parser
+errors and wrong prefixes. Both modes have permanent malformed-input fixtures.
+A concurrent initial-project CAS fixture proves exactly one winner. Full suite
+with these additional fixtures: 257/0, seed338554; final guard recheck after the
+project classifier fix: 23/0, seed110697. Final extension review remains required.
