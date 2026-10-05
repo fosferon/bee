@@ -120,6 +120,9 @@ defmodule Bee.RegistryWritesTest do
     assert {:ok, 2} =
              Bee.backfill_projects(rows, "run", DateTime.utc_now() |> DateTime.to_iso8601(), repo)
 
+    assert {:ok, %{updated_at: unchanged}} = Bee.get(first.id, repo)
+    assert unchanged == first.updated_at
+
     assert {:ok, 0} =
              Bee.backfill_projects(
                rows,

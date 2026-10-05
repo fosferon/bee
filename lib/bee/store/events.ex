@@ -35,6 +35,10 @@ defmodule Bee.Store.Events do
   # second timestamp that would make the issue returned by create immediately stale.
   defp touch_issue(_conn, _issue_id, "issue.created", _now), do: :ok
 
+  # Project backfill is legacy registry repair: its published contract preserves
+  # the issue timestamp. The event and audit log still retain the repair time.
+  defp touch_issue(_conn, _issue_id, "issue.project_backfilled", _now), do: :ok
+
   defp touch_issue(conn, issue_id, _event_type, now) do
     execute(conn, "UPDATE issues SET updated_at = ? WHERE id = ?", [now, issue_id])
   end

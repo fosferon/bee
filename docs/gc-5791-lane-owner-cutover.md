@@ -79,3 +79,9 @@ errors and wrong prefixes. Both modes have permanent malformed-input fixtures.
 A concurrent initial-project CAS fixture proves exactly one winner. Full suite
 with these additional fixtures: 257/0, seed338554; final guard recheck after the
 project classifier fix: 23/0, seed110697. Final extension review remains required.
+Final consumer compatibility resolution: Events.record normally touches the issue
+timestamp as well. The new issue.project_backfilled event has a narrow timestamp
+exception, matching legacy repair semantics while retaining owned event sequence
+and event/log creation time. Permanent owner fixture asserts unchanged updated_at.
+Final standalone full suite: 257/0 (one existing performance exclusion), seed545246,
+/private/tmp/gc-5791-bee-registry-accepted.log.
