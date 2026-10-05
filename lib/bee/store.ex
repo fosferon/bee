@@ -254,7 +254,7 @@ defmodule Bee.Store do
   def update_issue(conn, id, attrs) do
     case get_issue(conn, id) do
       {:ok, _issue} -> do_update_issue(conn, id, attrs)
-      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -280,26 +280,33 @@ defmodule Bee.Store do
         {sets, vals}
       end
 
-    if sets == [] and not Map.has_key?(attrs, :labels) do
-      :ok
-    else
-      unless sets == [] do
-        sets = ["updated_at = ?" | sets]
-        vals = [now_iso() | vals]
-
-        set_clause = sets |> Enum.reverse() |> Enum.join(", ")
-        sql = "UPDATE issues SET #{set_clause} WHERE id = ?"
-        exec(conn, sql, Enum.reverse(vals) ++ [id])
-      end
-
-      if Map.has_key?(attrs, :labels) do
-        exec(conn, "DELETE FROM issue_labels WHERE issue_id = ?", [id])
-        Enum.each(Map.get(attrs, :labels, []), fn label -> insert_label(conn, id, label) end)
-      end
-
+    with :ok <- update_issue_columns(conn, id, sets, vals),
+         :ok <- update_issue_labels(conn, id, attrs) do
       :ok
     end
   end
+
+  defp update_issue_columns(_conn, _id, [], _vals), do: :ok
+
+  defp update_issue_columns(conn, id, sets, vals) do
+    sets = ["updated_at = ?" | sets]
+    vals = [now_iso() | vals]
+    set_clause = sets |> Enum.reverse() |> Enum.join(", ")
+    exec(conn, "UPDATE issues SET #{set_clause} WHERE id = ?", Enum.reverse(vals) ++ [id])
+  end
+
+  defp update_issue_labels(conn, id, %{labels: labels}) do
+    with :ok <- exec(conn, "DELETE FROM issue_labels WHERE issue_id = ?", [id]) do
+      Enum.reduce_while(labels, :ok, fn label, :ok ->
+        case insert_label(conn, id, label) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp update_issue_labels(_conn, _id, _attrs), do: :ok
 
   @spec issue_parent(Exqlite.Sqlite3.db(), String.t()) ::
           {:ok, String.t() | nil} | {:error, :not_found}

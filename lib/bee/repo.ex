@@ -636,6 +636,49 @@ defmodule Bee.Repo do
     end
   end
 
+  defp handle_request({:upsert_project_registry, id, attrs, expected} = request, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- qualify_owner_write(state, request),
+             {:ok, _} = result <-
+               Bee.Store.RegistryWrites.upsert_project(state.conn, id, attrs, expected),
+             do: result
+      end)
+
+    case result do
+      {:ok, _} -> Bee.World.add_project(state.alloc_graph, id)
+      {:error, _} -> :ok
+    end
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:backfill_projects, rows, run_id, now} = request, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- qualify_owner_write(state, request),
+             do: Bee.Store.RegistryWrites.backfill(state.conn, rows, run_id, now, state.prefix)
+      end)
+
+    case result do
+      {:ok, _} ->
+        Bee.World.rebuild(state.alloc_graph, state.conn)
+        {:reply, result, schedule_export(state)}
+
+      {:error, _} ->
+        {:reply, result, state}
+    end
+  end
+
+  defp qualify_owner_write(%{lane_write_fence: false}, _request), do: :ok
+
+  defp qualify_owner_write(state, request) do
+    case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
   defp handle_request({:register_project, id, attrs}, _from, state) do
     result =
       transaction(state.conn, fn ->

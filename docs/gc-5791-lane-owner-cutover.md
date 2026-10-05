@@ -46,3 +46,25 @@ Final bounded evidence (2026-10-04): full Bee suite 250 tests, zero failures
 /private/tmp/gc-5791-bee-owner-final-suite.log. Three independent review layers
 resolved all confirmed defects; default and fenced import rollback, collateral
 targets and private messages also passed external independent probes.
+
+## Owner-only registry and bulk extension
+
+The consumer audit found additional raw writer bypasses. The staged extension
+adds closed `upsert_project_registry` and `backfill_projects` owner messages.
+Project upserts carry twelve canonical fields and the original fourteen-column
+row snapshot (nil for a new project); the owner compares that exact snapshot
+inside BEGIN IMMEDIATE before writing, preserving created identity and refusing
+stale overwrites. There is no SQL, connection loan, or executable builder port.
+Project target qualification includes every issue referring to that project.
+Backfill qualifies every issue and its existing parent, then commits all actual
+issue changes, audit log rows and owned events in one transaction. Already-filled
+rows contribute zero to the returned update count. Both messages requalify under
+the write transaction; unknown messages still fail closed when fenced.
+
+Legacy Store.update_issue now propagates column and label write errors to its
+existing Repo transaction, so failed updates cannot emit successful receipts or
+cause gc_work done to report closure. Five permanent fixtures cover snapshot
+conflicts, project fence rejection, all-target bulk rejection, audit rollback,
+and column/label failure rollback. Standalone suite: 255 tests, zero failures,
+one existing performance exclusion; seed 430745. These changes remain local,
+unpublished, and require independent extension review and consumer verification.

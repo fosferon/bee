@@ -217,6 +217,12 @@ defmodule Bee.LaneWriteFenceTest do
 
           case call do
             {:handle_request, _, [request | _]} ->
+              request =
+                case request do
+                  {:=, _, [pattern, _]} -> pattern
+                  pattern -> pattern
+                end
+
               op =
                 case request do
                   {:{}, _, [op | _]} -> op

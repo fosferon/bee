@@ -118,6 +118,14 @@ defmodule Bee do
   """
   def ready(opts \\ [], server \\ @default_server), do: GenServer.call(server, {:ready, opts})
 
+  @doc "Canonical registry upsert with original-row comparison inside the owner transaction."
+  def upsert_project_registry(id, attrs, expected, server \\ @default_server),
+    do: GenServer.call(server, {:upsert_project_registry, id, attrs, expected})
+
+  @doc "Atomically backfill positively qualified issue targets and their audit rows."
+  def backfill_projects(rows, run_id, now, server \\ @default_server),
+    do: GenServer.call(server, {:backfill_projects, rows, run_id, now})
+
   def list(opts \\ [], server \\ @default_server) do
     Bee.Store.validate_opts!(opts)
     GenServer.call(server, {:list, opts})

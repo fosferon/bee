@@ -9,7 +9,7 @@ defmodule Bee.Store.LaneWriteFence do
   """
 
   @reads ~w(get get_comments list count query ancestors ask list_intents list_measures tree_page ready traverse candidates list_projects list_agents who_blocks_whom agent_load critical_path rollup bottlenecks prefix reconcile_lane_issue)a
-  @mutations ~w(create update comment block unblock lock unlock assign measure register_project register_agent join_project register_measure register_intent remove_intent import_jsonl sweep_expired_locks)a
+  @mutations ~w(create update comment block unblock lock unlock assign measure register_project register_agent join_project register_measure register_intent remove_intent import_jsonl sweep_expired_locks upsert_project_registry backfill_projects)a
 
   def reads, do: @reads
   def mutations, do: @mutations
@@ -81,6 +81,41 @@ defmodule Bee.Store.LaneWriteFence do
         request,
         prefix
       )
+
+  defp targets(conn, {:upsert_project_registry, project, _, _} = request, prefix),
+    do:
+      queried_targets(
+        conn,
+        "SELECT id FROM issues WHERE project_id = ?",
+        [project],
+        request,
+        prefix
+      )
+
+  defp targets(conn, {:backfill_projects, rows, run_id, now}, prefix)
+       when is_list(rows) and is_binary(run_id) and is_binary(now) do
+    if Enum.all?(
+         rows,
+         &match?(
+           %{id: _, project_id: project, rule: rule}
+           when is_binary(project) and is_binary(rule),
+           &1
+         )
+       ) do
+      Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, ids} ->
+        case targets(conn, {:update, row.id, %{project_id: row.project_id}}, prefix) do
+          {:ok, current, _} -> {:cont, {:ok, ids ++ current}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, ids} -> finish(ids, {:backfill_projects, rows, run_id, now}, prefix)
+        {:error, _} = error -> error
+      end
+    else
+      invalid()
+    end
+  end
 
   defp targets(conn, {:register_agent, agent, _} = request, prefix),
     do:
