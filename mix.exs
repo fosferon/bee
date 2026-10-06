@@ -1,7 +1,7 @@
 defmodule Bee.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0"
   @source_url "https://github.com/fosferon/bee"
 
   def project do
@@ -39,6 +39,7 @@ defmodule Bee.MixProject do
 
   defp package do
     [
+      name: "bee_tracker",
       licenses: ["MIT"],
       links: %{
         "GitHub" => @source_url,

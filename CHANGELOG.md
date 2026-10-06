@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - Unreleased candidate
+
 ### Added
 
+- Hex package identity `bee_tracker`, retaining the `:bee` OTP application and
+  `Bee.*` API. The package is prepared locally; Hex publication is pending.
+- Lane-owner mutation fences and original-key receipts for internal owner writes
+  (GC-5791), preserving the existing unowned issue API.
 - Parent-tree fields on the composable query (GC-5834): `under` / `include_root`,
   `depth` (status-scoped when there is no `under`), `fold` (subtree roll-ups that
   ignore the other filters), `path`, and `keep_ancestors` (context rows).

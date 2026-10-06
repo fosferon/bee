@@ -39,15 +39,25 @@ alters, or drops objects in it. The boundary is the namespace.
 
 ## Installation
 
-Bee is not yet on Hex.pm (the `bee` name is taken by another package; a
-rename is pending). For now, depend on it directly from Git:
+The Hex package name is **`bee_tracker`**; the OTP application remains `:bee`
+and the public modules remain `Bee.*`. This release candidate has not yet been
+published to Hex. The current master is available from Git:
 
 ```elixir
 def deps do
   [
-    {:bee, git: "https://github.com/fosferon/bee.git", tag: "v0.2.0"}
+    {:bee, git: "https://github.com/fosferon/bee.git", branch: "master"}
   ]
 end
+```
+
+For a reproducible build, pin the reviewed runtime commit with
+`ref: "05ea3a4dcb7b314ce15927fb51554ee81f036816"` instead of `branch: "master"`.
+
+After the first Hex release is published, use the package alias:
+
+```elixir
+{:bee, "~> 0.3.0", hex: :bee_tracker}
 ```
 
 Then fetch and compile:
@@ -323,7 +333,7 @@ is both a backup and a portability format.
 ## Testing & development
 
 ```bash
-mix test         # 178 tests
+mix test
 mix docs         # build this README into HexDocs
 mix hex.build    # build the package tarball
 ```
