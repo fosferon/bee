@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Enable once per clone: git config core.hooksPath .githooks
+PUBLIC_GUARD_EXTRA_FILE="${PUBLIC_GUARD_EXTRA_FILE:-$HOME/.config/fosferon/public-guard-extra.txt}" \
+  exec "$(git rev-parse --show-toplevel)/scripts/public_guard.sh"

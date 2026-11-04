@@ -1,0 +1,1309 @@
+defmodule Bee.Repo do
+  @moduledoc """
+  The GenServer that owns the writer connection, the in-memory dependency and
+  allocation graphs, and the JSONL export. Backs the `Bee.*` module API.
+
+  Start it directly for tests or single-process use:
+
+      {:ok, _pid} =
+        Bee.Repo.start_link(db_path: db_path, prefix: "bee", jsonl_path: nil, name: :my_bee)
+
+  In a supervised application, prefer `Bee.Supervisor`, which also starts the
+  read-only connection pool and the lock sweeper.
+
+  `Bee.Repo` also exposes a versioned GenServer **message protocol** — the wire
+  contract for node-crossing consumers (`{:create, title, opts}`, `{:ready, opts}`,
+  ...). It is a supported surface, equal to the `Bee.*` API; see the README's
+  "Two consumption surfaces" section.
+  """
+  use GenServer
+  require Logger
+
+  @checkpoint_interval_ms 60_000
+  @wal_threshold_bytes 10_000_000
+  @export_debounce_ms 5_000
+  @export_flush_bound_ms 10_000
+
+  @doc """
+  Starts the Repo GenServer. Options: `:db_path` (required), `:prefix`,
+  `:jsonl_path`, `:name`, and `:start_pool?` (default `true`; set `false` when
+  running under `Bee.Supervisor`, which owns the pool).
+  """
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  end
+
+  @doc false
+  @impl true
+  def init(opts) do
+    Process.flag(:trap_exit, true)
+
+    db_path = Keyword.fetch!(opts, :db_path)
+    prefix = Keyword.fetch!(opts, :prefix)
+    jsonl_path = Keyword.get(opts, :jsonl_path)
+
+    db_path |> Path.dirname() |> File.mkdir_p!()
+
+    skip_migration? = Keyword.get(opts, :skip_migration?, false)
+
+    migration_result =
+      if skip_migration? do
+        :ok
+      else
+        Bee.Store.Migrate.run_at_boot(db_path)
+      end
+
+    case migration_result do
+      :ok ->
+        {:ok, conn} = Exqlite.Sqlite3.open(db_path)
+        :ok = Bee.Store.init_schema(conn)
+
+        dep_graph = Bee.Graph.new()
+        alloc_graph = Bee.World.new()
+
+        # Auto-import JSONL on first boot (empty DB + file exists)
+        maybe_seed_from_jsonl(conn, jsonl_path, prefix)
+
+        Bee.Graph.rebuild(dep_graph, conn)
+        Bee.World.rebuild(alloc_graph, conn)
+
+        # Sweeper is a separate process — no timer needed here.
+        schedule_checkpoint()
+
+        # Start the reader pool. When running under
+        # Bee.Supervisor (start_pool?: false), the pool is a separate
+        # child. When standalone (tests), Repo starts it internally.
+        pool_name = read_pool_name(opts)
+        start_pool? = Keyword.get(opts, :start_pool?, true)
+
+        pool_pid =
+          if start_pool? do
+            {:ok, pid} = Bee.Read.Pool.start_link(db_path: db_path, name: pool_name)
+            pid
+          else
+            nil
+          end
+
+        register_reader(Keyword.get(opts, :name, __MODULE__), pool_name, prefix)
+
+        {:ok,
+         %{
+           conn: conn,
+           dep_graph: dep_graph,
+           alloc_graph: alloc_graph,
+           prefix: prefix,
+           jsonl_path: jsonl_path,
+           lane_write_fence: Keyword.get(opts, :lane_write_fence, false),
+           export_mode: :on_write,
+           db_path: db_path,
+           pool_pid: pool_pid,
+           pool_name: pool_name,
+           export_timer: nil
+         }}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
+  end
+
+  # --- GenServer calls ---
+
+  @impl true
+  def handle_call({:mutate_lane_issue, attrs, check}, _from, state) do
+    result =
+      with :ok <- Bee.Store.LaneMutation.validate(attrs),
+           do:
+             transaction(state.conn, fn ->
+               with :ok <-
+                      Bee.Store.LaneMutation.authorize(check, attrs.principal_ref, attrs.lane_id),
+                    do: Bee.Store.LaneMutation.apply_command(state.conn, attrs)
+             end)
+
+    case result do
+      {:ok, %{replayed: false} = result} ->
+        if attrs.action == "assign",
+          do: Bee.World.assign(state.alloc_graph, attrs.issue_id, attrs.body["agent_id"])
+
+        {:reply, {:ok, result}, schedule_export(state)}
+
+      {:ok, _} = result ->
+        {:reply, result, state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:reconcile_lane_mutation, command, principal, lane, check}, _from, state) do
+    result =
+      with :ok <- Bee.Store.LaneMutation.validate_reconciliation(command, principal, lane),
+           :ok <- Bee.Store.LaneMutation.authorize(check, principal, lane),
+           {:ok, %{receipt: %{lane_id: ^lane}}} = result <-
+             Bee.Store.LaneMutation.reconcile(state.conn, command, principal),
+           do: result
+
+    result =
+      case result do
+        {:ok, %{receipt: %{lane_id: ^lane}}} = found -> found
+        {:ok, _} -> {:error, :non_disclosing_conflict}
+        {:error, _} = error -> error
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:lane_write_fence_status, _from, state),
+    do: {:reply, {:ok, if(state.lane_write_fence, do: :enabled, else: :disabled)}, state}
+
+  def handle_call({:classify_lane_write, request}, _from, state) do
+    {:reply, Bee.Store.LaneWriteFence.classify(state.conn, request, state.prefix), state}
+  end
+
+  def handle_call({op, _}, _from, state) when op in [:import_entries, :sweep_expired_targets],
+    do: {:reply, {:error, :private_owner_message}, state}
+
+  def handle_call(request, from, %{lane_write_fence: false} = state),
+    do: handle_request(request, from, state)
+
+  def handle_call(:conn, _from, state), do: {:reply, {:error, :owner_connection_private}, state}
+
+  def handle_call({:associate_lane_issue, _} = request, from, state),
+    do: handle_request(request, from, state)
+
+  def handle_call(request, from, state) do
+    if Bee.Store.LaneWriteFence.read?(request) do
+      handle_request(request, from, state)
+    else
+      case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
+        {:ok, prepared} -> handle_request(prepared, from, state)
+        {:error, _} = error -> {:reply, error, state}
+      end
+    end
+  end
+
+  defp handle_request(:conn, _from, state), do: {:reply, state.conn, state}
+
+  defp handle_request({:create, title, opts}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        id = Bee.Id.next(state.conn, state.prefix)
+
+        with {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
+          attrs = %{
+            id: id,
+            title: title,
+            description: Keyword.get(opts, :description),
+            priority: Keyword.get(opts, :priority),
+            issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
+            labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
+            parent: format_parent(Keyword.get(opts, :parent), state.prefix),
+            project_id: Keyword.get(opts, :project_id),
+            created_by: Keyword.get(opts, :actor),
+            metadata: metadata
+          }
+
+          with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
+               {:ok, _seq} <-
+                 Bee.Store.Events.record(state.conn, id, "issue.created",
+                   actor: attrs.created_by,
+                   fields:
+                     attrs
+                     |> Map.take([
+                       :id,
+                       :title,
+                       :description,
+                       :priority,
+                       :issue_type,
+                       :parent,
+                       :project_id,
+                       :created_by,
+                       :metadata
+                     ])
+                     |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
+                 ) do
+            {:ok, {id, attrs, issue}}
+          end
+        end
+      end)
+
+    case result do
+      {:ok, {id, attrs, issue}} ->
+        Bee.Graph.add_vertex(state.dep_graph, id)
+        Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
+        {:reply, {:ok, issue}, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request({:get, id}, _from, state) do
+    full = resolve_id(id, state.prefix)
+    lane = Bee.Query.Classifier.classify(:get)
+    result = read_with_pool(state, lane, fn conn -> Bee.Store.get_issue(conn, full) end)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:associate_lane_issue, attrs}, _from, state) do
+    if Bee.Store.LaneAssociation.valid?(attrs) and
+         String.starts_with?(attrs.issue_id, state.prefix <> "-") and
+         match?({:ok, id} when id > 0, Bee.Id.parse(attrs.issue_id)) do
+      result =
+        transaction(state.conn, fn ->
+          Bee.Store.LaneAssociation.associate(state.conn, attrs)
+        end)
+
+      case result do
+        {:ok, receipt} -> {:reply, {:ok, receipt}, state}
+        {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+      end
+    else
+      {:reply, {:error, :invalid_lane_association}, state}
+    end
+  end
+
+  defp handle_request({:reconcile_lane_issue, command_id}, _from, state) do
+    result =
+      if is_binary(command_id) and byte_size(command_id) in 1..256 do
+        Bee.Store.LaneAssociation.reconcile(state.conn, command_id)
+      else
+        {:error, :invalid_lane_association}
+      end
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:get, id, opts}, _from, state) do
+    case Bee.Store.validate_opts(opts) do
+      :ok ->
+        full = resolve_id(id, state.prefix)
+        lane = Bee.Query.Classifier.classify(:get)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.get_issue(conn, full, opts) end)
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_request({:get_comments, id}, _from, state) do
+    full = resolve_id(id, state.prefix)
+    lane = Bee.Query.Classifier.classify(:get_comments)
+    result = read_with_pool(state, lane, fn conn -> {:ok, Bee.Store.get_comments(conn, full)} end)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:list, opts}, _from, state) do
+    case Bee.Store.validate_opts(opts) do
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:list)
+
+        # `under` must be resolved here as it is for count/query: unresolved, a bare
+        # integer reaches build_scope/1 with no matching clause.
+        result =
+          read_with_pool(state, lane, fn conn ->
+            with {:ok, opts} <- Bee.Store.resolve_under(conn, opts, state.prefix) do
+              Bee.Store.list_issues(conn, opts)
+            end
+          end)
+
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_request({:count, opts}, _from, state) do
+    case Bee.Store.validate_opts(opts) do
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:count)
+        result = read_with_pool(state, lane, &count(&1, opts, state.prefix))
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_request({:query, spec}, _from, state) do
+    case Bee.Query.Spec.new(spec) do
+      {:ok, spec} ->
+        lane = Bee.Query.Classifier.classify(spec)
+
+        result =
+          read_with_pool(state, lane, fn conn ->
+            Bee.Query.Interpreter.execute(conn, spec, state.prefix)
+          end)
+
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_request({:ancestors, id}, _from, state) do
+    result = read_with_pool(state, :fast, &ancestors(&1, id, state.prefix))
+    {:reply, result, state}
+  end
+
+  defp handle_request({:ask, intent, opts}, _from, state) do
+    result =
+      with {:ok, spec} <- resolve_intent(state.conn, intent, opts) do
+        lane = Bee.Query.Classifier.classify(spec)
+
+        read_with_pool(state, lane, fn conn ->
+          Bee.Query.Interpreter.execute(conn, spec, state.prefix)
+        end)
+      end
+
+    if match?({:ok, _}, result), do: record_intent_usage_async(self(), intent)
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:register_intent, name, spec}, _from, state) do
+    result = Bee.Intent.Registry.register(state.conn, name, spec)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:remove_intent, name}, _from, state) do
+    result = Bee.Intent.Registry.remove(state.conn, name)
+    {:reply, result, state}
+  end
+
+  defp handle_request(:list_intents, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Intent.Registry.list/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:register_measure, name, unit, opts}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        case Bee.Store.Measurements.register(state.conn, name, unit, opts) do
+          :ok -> {:ok, :registered}
+          {:error, _reason} = error -> error
+        end
+      end)
+
+    case result do
+      {:ok, :registered} -> {:reply, :ok, state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  defp handle_request({:measure, issue_id, attrs}, _from, state) do
+    full = resolve_id(issue_id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, _issue} <- Bee.Store.get_issue(state.conn, full),
+             {:ok, measurement} <- Bee.Store.Measurements.prepare(state.conn, attrs),
+             {:ok, seq} <-
+               Bee.Store.Events.record(state.conn, full, "measurement.recorded",
+                 fields: fn seq ->
+                   %{measure: Map.put(measurement, :seq, seq)}
+                 end
+               ),
+             :ok <- Bee.Store.Measurements.record(state.conn, full, seq, measurement) do
+          {:ok, :recorded}
+        end
+      end)
+
+    case result do
+      {:ok, :recorded} -> {:reply, :ok, schedule_export(state)}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request(:list_measures, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Store.Measurements.list_registered/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:tree_page, opts}, _from, state) do
+    case Bee.Store.validate_opts(opts) do
+      :ok ->
+        lane = Bee.Query.Classifier.classify(:tree_page)
+        result = read_with_pool(state, lane, fn conn -> Bee.Store.list_tree_page(conn, opts) end)
+        {:reply, result, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp handle_request({:ready, opts}, _from, state) do
+    result =
+      with {:ok, spec} <-
+             opts
+             |> Keyword.put_new(:order_by, id: :asc)
+             |> Keyword.put(:ready, true)
+             |> Bee.Query.Spec.new() do
+        read_with_pool(state, :fast, fn conn ->
+          Bee.Store.list_issues(conn, Bee.Query.Spec.to_opts(spec))
+        end)
+      end
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:update, id, attrs}, _from, state) do
+    full = resolve_id(id, state.prefix)
+
+    case normalize_update_attrs(attrs, full, state) do
+      {:ok, normalized_attrs} when map_size(normalized_attrs) == 0 ->
+        {:reply, :ok, state}
+
+      {:ok, normalized_attrs} ->
+        {measure_attrs, issue_attrs} = Map.pop(normalized_attrs, :measure)
+
+        result =
+          transaction(state.conn, fn ->
+            with {:ok, measurement} <- prepare_measurement(state.conn, measure_attrs),
+                 :ok <- Bee.Store.update_issue(state.conn, full, issue_attrs),
+                 {:ok, seq} <-
+                   Bee.Store.Events.record(state.conn, full, "issue.updated",
+                     fields: fn seq ->
+                       fields = Map.drop(issue_attrs, [:labels])
+
+                       fields =
+                         if Map.has_key?(fields, :metadata) do
+                           Map.update!(fields, :metadata, &Bee.Store.Metadata.decode/1)
+                         else
+                           fields
+                         end
+
+                       if measurement do
+                         Map.put(fields, :measure, Map.put(measurement, :seq, seq))
+                       else
+                         fields
+                       end
+                     end
+                   ),
+                 :ok <- record_measurement(state.conn, full, seq, measurement) do
+              {:ok, :updated}
+            end
+          end)
+
+        case result do
+          {:ok, :updated} -> {:reply, :ok, schedule_export(state)}
+          {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+        end
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp handle_request({:comment, id, text, opts}, _from, state) do
+    full = resolve_id(id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Store.insert_comment(state.conn, full, text, opts),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full, "issue.commented",
+                 actor: Keyword.get(opts, :author),
+                 fields: %{body: text}
+               ) do
+          {:ok, :commented}
+        end
+      end)
+
+    case result do
+      {:ok, :commented} -> {:reply, :ok, schedule_export(state)}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request({:block, id, blocker_id}, _from, state) do
+    block_dependency(id, blocker_id, :blocks, state)
+  end
+
+  defp handle_request({:block, id, blocker_id, opts}, _from, state) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :type) do
+        {:ok, type} -> block_dependency(id, blocker_id, type, state)
+        :error -> block_dependency(id, blocker_id, :blocks, state)
+      end
+    else
+      {:reply, {:error, :unknown_dep_type}, state}
+    end
+  end
+
+  defp handle_request({:block, _id, _blocker_id, _opts}, _from, state),
+    do: {:reply, {:error, :unknown_dep_type}, state}
+
+  defp handle_request({:traverse, id, opts}, _from, state) when is_list(opts) do
+    full_id = resolve_id(id, state.prefix)
+
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        with {:ok, ids} <- Bee.Store.Deps.traverse(conn, full_id, opts) do
+          {:ok, Enum.map(ids, &Bee.Id.parse!/1)}
+        end
+      end)
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:traverse, _id, _opts}, _from, state),
+    do: {:reply, {:error, :invalid_spec}, state}
+
+  defp handle_request({:candidates, id}, _from, state) do
+    full_id = resolve_id(id, state.prefix)
+
+    result =
+      read_with_pool(state, :compute, fn conn -> Bee.Query.Candidates.for_issue(conn, full_id) end)
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:unblock, id, blocker_id}, _from, state) do
+    unblock_dependency(id, blocker_id, :blocks, state)
+  end
+
+  defp handle_request({:unblock, id, blocker_id, opts}, _from, state) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Keyword.fetch(opts, :type) do
+        {:ok, type} -> unblock_dependency(id, blocker_id, type, state)
+        :error -> unblock_dependency(id, blocker_id, :blocks, state)
+      end
+    else
+      {:reply, {:error, :unknown_dep_type}, state}
+    end
+  end
+
+  defp handle_request({:unblock, _id, _blocker_id, _opts}, _from, state),
+    do: {:reply, {:error, :unknown_dep_type}, state}
+
+  defp handle_request({:lock, id, opts}, _from, state) do
+    full = resolve_id(id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        if locked_by = Keyword.get(opts, :locked_by) do
+          Bee.Agents.insert_agent(state.conn, locked_by)
+        end
+
+        with {:ok, lock} <- Bee.Lock.acquire(state.conn, full, opts),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full, "lock.acquired",
+                 actor: lock.locked_by,
+                 fields: Map.take(lock, [:locked_by, :locked_at, :expires_at])
+               ) do
+          {:ok, lock}
+        end
+      end)
+
+    case result do
+      {:ok, lock} ->
+        if lock.locked_by, do: Bee.World.add_agent(state.alloc_graph, lock.locked_by)
+        {:reply, {:ok, lock}, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request({:unlock, id}, _from, state) do
+    full = resolve_id(id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        case Bee.Lock.get(state.conn, full) do
+          nil ->
+            {:ok, :unchanged}
+
+          lock ->
+            with :ok <- Bee.Lock.release(state.conn, full),
+                 {:ok, _seq} <-
+                   Bee.Store.Events.record(state.conn, full, "lock.released",
+                     actor: Map.get(lock, "locked_by"),
+                     fields: %{}
+                   ) do
+              {:ok, :unlocked}
+            end
+        end
+      end)
+
+    case result do
+      {:ok, :unlocked} -> {:reply, :ok, schedule_export(state)}
+      {:ok, :unchanged} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request({:upsert_project_registry, id, attrs, expected} = request, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- qualify_owner_write(state, request),
+             {:ok, _} = result <-
+               Bee.Store.RegistryWrites.upsert_project(state.conn, id, attrs, expected),
+             do: result
+      end)
+
+    case result do
+      {:ok, _} -> Bee.World.add_project(state.alloc_graph, id)
+      {:error, _} -> :ok
+    end
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:backfill_projects, rows, run_id, now} = request, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- qualify_owner_write(state, request),
+             do: Bee.Store.RegistryWrites.backfill(state.conn, rows, run_id, now, state.prefix)
+      end)
+
+    case result do
+      {:ok, _} ->
+        Bee.World.rebuild(state.alloc_graph, state.conn)
+        {:reply, result, schedule_export(state)}
+
+      {:error, _} ->
+        {:reply, result, state}
+    end
+  end
+
+  defp qualify_owner_write(%{lane_write_fence: false}, _request), do: :ok
+
+  defp qualify_owner_write(state, request) do
+    case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp handle_request({:register_project, id, attrs}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, attrs} <- normalize_metadata(attrs),
+             {:ok, project} <- Bee.Agents.insert_project(state.conn, id, attrs) do
+          {:ok, project}
+        end
+      end)
+
+    case result do
+      {:ok, project} ->
+        Bee.World.add_project(state.alloc_graph, id)
+        {:reply, {:ok, project}, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp handle_request({:register_agent, id, attrs}, _from, state) do
+    result = Bee.Agents.insert_agent(state.conn, id, attrs)
+    Bee.World.add_agent(state.alloc_graph, id)
+    {:reply, result, state}
+  end
+
+  defp handle_request(:list_projects, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Agents.list_projects/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request(:list_agents, _from, state) do
+    result = read_with_pool(state, :fast, &Bee.Agents.list_agents/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:assign, issue_id, agent_id}, _from, state) do
+    full = resolve_id(issue_id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with {:ok, issue} <- Bee.Store.get_issue(state.conn, full) do
+          if issue.assigned_to == agent_id do
+            {:ok, :unchanged}
+          else
+            with :ok <- Bee.Agents.assign_issue(state.conn, full, agent_id),
+                 {:ok, _seq} <-
+                   Bee.Store.Events.record(state.conn, full, "issue.updated",
+                     fields: %{assigned_to: agent_id}
+                   ) do
+              {:ok, :assigned}
+            end
+          end
+        end
+      end)
+
+    case result do
+      {:ok, :assigned} ->
+        Bee.World.assign(state.alloc_graph, full, agent_id)
+        {:reply, :ok, schedule_export(state)}
+
+      {:ok, :unchanged} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp handle_request({:join_project, agent_id, project_id}, _from, state) do
+    Bee.Agents.add_project_agent(state.conn, project_id, agent_id)
+    Bee.World.join_project(state.alloc_graph, agent_id, project_id)
+    {:reply, :ok, state}
+  end
+
+  defp handle_request(:who_blocks_whom, _from, state) do
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.who_blocks_whom/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:agent_load, agent_id}, _from, state) do
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.agent_load(&1, agent_id))
+    {:reply, result, state}
+  end
+
+  defp handle_request(:critical_path, _from, state) do
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        {:ok, conn |> Bee.Store.Deps.critical_path() |> Enum.map(&Bee.Id.parse!/1)}
+      end)
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:critical_path, opts}, _from, state) when is_list(opts) do
+    opts =
+      case Keyword.get(opts, :root) do
+        nil -> opts
+        root -> Keyword.put(opts, :root, resolve_id(root, state.prefix))
+      end
+
+    result =
+      read_with_pool(state, :compute, fn conn ->
+        case Bee.Store.Deps.critical_path(conn, opts) do
+          {:ok, path} -> {:ok, Enum.map(path, &Bee.Id.parse!/1)}
+          {:error, _reason} = error -> error
+        end
+      end)
+
+    {:reply, result, state}
+  end
+
+  defp handle_request({:critical_path, _opts}, _from, state),
+    do: {:reply, {:error, :invalid_spec}, state}
+
+  defp handle_request({:rollup, id, opts}, _from, state) do
+    full = resolve_id(id, state.prefix)
+    result = read_with_pool(state, :compute, &Bee.Graph.Rollup.compute(&1, full, opts))
+    {:reply, result, state}
+  end
+
+  defp handle_request(:bottlenecks, _from, state) do
+    result = read_with_pool(state, :compute, &Bee.Graph.Allocation.bottlenecks/1)
+    {:reply, result, state}
+  end
+
+  defp handle_request({:import_entries, entries}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        Bee.Export.import_entries(state.conn, entries, state.prefix)
+      end)
+
+    case result do
+      {:ok, count} ->
+        Bee.Graph.rebuild(state.dep_graph, state.conn)
+        Bee.World.rebuild(state.alloc_graph, state.conn)
+        {:reply, {:ok, count}, schedule_export(state)}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp handle_request({:import_jsonl, path}, from, state) do
+    case Bee.Export.read_entries(path) do
+      {:ok, entries} -> handle_request({:import_entries, entries}, from, state)
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  defp handle_request(:prefix, _from, state), do: {:reply, state.prefix, state}
+
+  defp handle_request({:sweep_expired_targets, ids}, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        Enum.reduce_while(ids, {:ok, 0}, fn id, {:ok, count} ->
+          case Bee.Lock.release(state.conn, id) do
+            :ok -> {:cont, {:ok, count + 1}}
+            {:error, _} = error -> {:halt, error}
+          end
+        end)
+      end)
+
+    case result do
+      {:ok, count} -> {:reply, count, schedule_export(state)}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  defp handle_request(:sweep_expired_locks, _from, state) do
+    # The sweeper dispatches through the writer (no own connection).
+    # Bee.Lock.sweep_expired/1 emits no command events; preserve that legacy
+    # contract. The opt-in fence qualifies and freezes the selected target set.
+    swept = Bee.Lock.sweep_expired(state.conn)
+    state = schedule_export(state)
+    {:reply, swept, state}
+  end
+
+  @doc false
+  @impl true
+  def handle_info(:checkpoint, state) do
+    :ok = Bee.Store.wal_checkpoint(state.conn, :passive)
+    maybe_log_wal_size(state.db_path)
+    schedule_checkpoint()
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:flush_export, state) do
+    flush_export(state)
+    {:noreply, %{state | export_timer: nil}}
+  end
+
+  # Trapped exit from linked process (Task.async for flush, pool, etc.)
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, state) do
+    {:noreply, state}
+  end
+
+  @doc false
+  @impl true
+  def handle_cast({:record_intent_usage, name, kind}, state) do
+    _ = Bee.Store.Intents.record_usage(state.conn, name, kind)
+    {:noreply, state}
+  end
+
+  @doc false
+  @impl true
+  def terminate(_reason, state) do
+    # Stop the reader pool first (if we own it) so all read
+    # connections release the WAL before the writer's TRUNCATE checkpoint.
+    # Under Bee.Supervisor, the pool is a separate child that dies first
+    # via reverse-order shutdown — so we only stop it here if we started it.
+    pool_pid = Map.get(state, :pool_pid)
+
+    if pool_pid != nil and Process.alive?(pool_pid) do
+      try do
+        Supervisor.stop(pool_pid, :shutdown)
+      rescue
+        e -> Logger.warning("Pool stop at terminate failed: #{inspect(e)}")
+      end
+    end
+
+    # TRUNCATE checkpoint succeeds here because the reader pool
+    # is now dead — no persistent readers hold the WAL.
+    try do
+      Bee.Store.wal_checkpoint(state.conn, :truncate)
+    rescue
+      e -> Logger.warning("TRUNCATE checkpoint at terminate failed: #{inspect(e)}")
+    end
+
+    # final JSONL flush on orderly/trapped exit (bounded, atomic)
+    # On brutal kill this does NOT run; the window is lost but recoverable
+    # by re-export since JSONL is derived (shutdown invariant).
+    if state[:export_timer] do
+      Process.cancel_timer(state[:export_timer])
+    end
+
+    flush_export(state)
+
+    Exqlite.Sqlite3.close(state.conn)
+    :digraph.delete(state.dep_graph)
+    :digraph.delete(state.alloc_graph)
+    :ok
+  end
+
+  # --- Helpers ---
+
+  defp block_dependency(id, blocker_id, type, state) do
+    full_id = resolve_id(id, state.prefix)
+    full_blocker = resolve_id(blocker_id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Dependency.Type.validate(type),
+             :ok <- Bee.Store.Acyclic.dependency(state.conn, full_id, full_blocker),
+             :ok <- Bee.Store.insert_dependency(state.conn, full_id, full_blocker, type),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full_id, "dep.added",
+                 fields: %{
+                   depends_on_id: full_blocker,
+                   dep_type: Bee.Dependency.Type.storage_name(type)
+                 }
+               ) do
+          {:ok, :blocked}
+        end
+      end)
+
+    case result do
+      {:ok, :blocked} ->
+        if type in Bee.Dependency.Type.gating() do
+          :ok = Bee.Graph.add_dependency(state.dep_graph, full_id, full_blocker)
+        end
+
+        {:reply, :ok, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp transaction(conn, fun) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE"),
+         {:ok, result} <- fun.(),
+         :ok <- execute(conn, "COMMIT") do
+      {:ok, result}
+    else
+      {:error, _reason} = error ->
+        _ = execute(conn, "ROLLBACK")
+        error
+    end
+  end
+
+  defp execute(conn, sql) do
+    case Exqlite.Sqlite3.execute(conn, sql) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unblock_dependency(id, blocker_id, type, state) do
+    full_id = resolve_id(id, state.prefix)
+    full_blocker = resolve_id(blocker_id, state.prefix)
+
+    result =
+      transaction(state.conn, fn ->
+        with :ok <- Bee.Dependency.Type.validate(type),
+             true <- Bee.Store.dependency_exists?(state.conn, full_id, full_blocker, type),
+             :ok <- Bee.Store.remove_dependency(state.conn, full_id, full_blocker, type),
+             {:ok, _seq} <-
+               Bee.Store.Events.record(state.conn, full_id, "dep.removed",
+                 fields: %{
+                   depends_on_id: full_blocker,
+                   dep_type: Bee.Dependency.Type.storage_name(type)
+                 }
+               ) do
+          {:ok, :unblocked}
+        else
+          false -> {:ok, :unchanged}
+          {:error, _reason} = error -> error
+        end
+      end)
+
+    case result do
+      {:ok, :unblocked} ->
+        unless Bee.Store.has_gating_dependency?(state.conn, full_id, full_blocker) do
+          :ok = Bee.Graph.remove_dependency(state.dep_graph, full_id, full_blocker)
+        end
+
+        {:reply, :ok, schedule_export(state)}
+
+      {:ok, :unchanged} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp schedule_export(%{jsonl_path: nil} = state), do: state
+  defp schedule_export(%{export_mode: :disabled} = state), do: state
+
+  defp schedule_export(state) do
+    # Cancel any pending debounce timer
+    if state[:export_timer] do
+      Process.cancel_timer(state[:export_timer])
+    end
+
+    # Schedule a new flush after the debounce period
+    timer = Process.send_after(self(), :flush_export, @export_debounce_ms)
+    %{state | export_timer: timer}
+  end
+
+  defp flush_export(%{jsonl_path: nil}), do: :ok
+  defp flush_export(%{export_mode: :disabled}), do: :ok
+
+  defp flush_export(state) do
+    task =
+      Task.async(fn ->
+        {:ok, conn} = Exqlite.Sqlite3.open(state.db_path)
+        :ok = Bee.Store.configure_pragmas(conn)
+
+        try do
+          Bee.Export.export(conn, state.jsonl_path)
+        after
+          Exqlite.Sqlite3.close(conn)
+        end
+      end)
+
+    case Task.yield(task, @export_flush_bound_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, :ok} -> :ok
+      nil -> {:error, :flush_bound_exceeded}
+      {:exit, reason} -> {:error, {:export_crashed, reason}}
+    end
+  end
+
+  defp schedule_checkpoint do
+    Process.send_after(self(), :checkpoint, @checkpoint_interval_ms)
+  end
+
+  defp maybe_log_wal_size(db_path) do
+    wal_path = db_path <> "-wal"
+
+    case File.stat(wal_path) do
+      {:ok, %{size: size}} when size > @wal_threshold_bytes ->
+        Logger.warning("Bee WAL exceeded threshold: #{div(size, 1_000_000)}MB (#{wal_path})")
+
+      _ ->
+        :ok
+    end
+  end
+
+  # A SQLite FOREIGN KEY violation on a write that references an issue means the
+  # target issue no longer exists (a comment/lock against a deleted
+  # issue). Translate that raw driver error into a structured `:not_found` so
+  # callers get a clean not-found instead of a crashed GenServer. Structured
+  # atoms (`:already_locked`, `:cycle`) and any other reason pass through.
+  defp classify_write_error(reason) when is_binary(reason) do
+    if reason =~ ~r/FOREIGN KEY/i, do: :not_found, else: reason
+  end
+
+  defp classify_write_error(reason), do: reason
+
+  defp resolve_id(id, prefix), do: Bee.Id.to_prefixed(id, prefix)
+
+  defp resolve_intent(_conn, intent, opts) when is_atom(intent),
+    do: Bee.Intent.Core.resolve(intent, opts)
+
+  defp resolve_intent(conn, intent, _opts) when is_binary(intent),
+    do: Bee.Intent.Registry.resolve(conn, intent)
+
+  defp resolve_intent(_conn, _intent, _opts), do: {:error, :unknown_intent}
+
+  defp record_intent_usage_async(repo, intent) do
+    {name, kind} =
+      case intent do
+        intent when is_atom(intent) -> {Atom.to_string(intent), "core"}
+        intent when is_binary(intent) -> {intent, "registered"}
+      end
+
+    Task.start(fn -> GenServer.cast(repo, {:record_intent_usage, name, kind}) end)
+  end
+
+  # --- Reads that bypass this process ---
+  #
+  # A read has no business queueing behind writes. `Bee.query/2`, `Bee.count/2` and
+  # `Bee.ancestors/2` check a connection out of the read pool in the CALLER's
+  # process, so a board scrolling under write load waits only for a pooled reader.
+  # To do that the caller needs this Repo's pool and id prefix; they are published
+  # here at init, keyed by the registered name.
+
+  @doc false
+  @spec read(atom() | pid(), :fast | :compute, (Exqlite.Sqlite3.db(), String.t() -> term())) ::
+          {:ok, term()} | :unavailable
+  def read(server, lane, fun) when is_atom(server) do
+    with %{pool: pool, prefix: prefix} <- :persistent_term.get({__MODULE__, :reader, server}, nil),
+         true <- is_pid(GenServer.whereis(lane_pool_name(pool, lane))) do
+      {:ok, Bee.Read.Pool.with_connection(pool, lane, &fun.(&1, prefix))}
+    else
+      _ -> :unavailable
+    end
+  end
+
+  def read(_server, _lane, _fun), do: :unavailable
+
+  @doc false
+  @spec count(Exqlite.Sqlite3.db(), keyword(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count(conn, opts, prefix) do
+    with {:ok, opts} <- Bee.Store.resolve_under(conn, opts, prefix) do
+      Bee.Store.count_issues(conn, opts)
+    end
+  end
+
+  @doc false
+  @spec ancestors(Exqlite.Sqlite3.db(), term(), String.t()) ::
+          {:ok, [map()]} | {:error, :not_found}
+  def ancestors(conn, id, prefix) do
+    with {:ok, [under: full]} <- Bee.Store.resolve_under(conn, [under: id], prefix) do
+      chain =
+        conn
+        |> Bee.Store.Tree.ancestor_chains([full])
+        |> Map.get(full, [])
+        |> Enum.flat_map(fn ancestor ->
+          case Bee.Id.parse(ancestor.id) do
+            {:ok, n} -> [ancestor |> Map.delete(:dist) |> Map.put(:id, n)]
+            {:error, :invalid_id} -> []
+          end
+        end)
+
+      {:ok, chain}
+    else
+      {:error, {:not_found, _id}} -> {:error, :not_found}
+    end
+  end
+
+  defp register_reader(name, pool_name, prefix) when is_atom(name),
+    do: :persistent_term.put({__MODULE__, :reader, name}, %{pool: pool_name, prefix: prefix})
+
+  defp register_reader(_name, _pool_name, _prefix), do: :ok
+
+  defp lane_pool_name(pool, :fast), do: Bee.Read.Pool.fast_pool_name(pool)
+  defp lane_pool_name(pool, :compute), do: Bee.Read.Pool.compute_pool_name(pool)
+
+  defp read_pool_name(opts) do
+    case Keyword.get(opts, :pool_name) do
+      nil ->
+        base = Keyword.get(opts, :name, Bee.Repo)
+        :"#{base}.ReadPool"
+
+      name ->
+        name
+    end
+  end
+
+  defp read_with_pool(state, lane, fun) do
+    pool_name = Map.get(state, :pool_name)
+    pool_pid = Map.get(state, :pool_pid)
+
+    actual_pool =
+      case lane do
+        :fast -> Bee.Read.Pool.fast_pool_name(pool_name)
+        :compute -> Bee.Read.Pool.compute_pool_name(pool_name)
+      end
+
+    # Use the pool if it's running (either linked pid or external supervisor child)
+    pool_alive? =
+      (pool_pid != nil and Process.alive?(pool_pid)) or
+        (is_atom(actual_pool) and GenServer.whereis(actual_pool) != nil)
+
+    if pool_alive? do
+      NimblePool.checkout!(
+        actual_pool,
+        nil,
+        fn _from, conn ->
+          try do
+            {fun.(conn), conn}
+          rescue
+            e -> {{:error, {:read_failed, e}}, conn}
+          end
+        end,
+        :infinity
+      )
+    else
+      fun.(state.conn)
+    end
+  end
+
+  defp format_parent(parent, prefix), do: Bee.Id.format_parent(parent, prefix)
+
+  defp prepare_measurement(_conn, nil), do: {:ok, nil}
+  defp prepare_measurement(conn, attrs), do: Bee.Store.Measurements.prepare(conn, attrs)
+
+  defp record_measurement(_conn, _issue_id, _seq, nil), do: :ok
+
+  defp record_measurement(conn, issue_id, seq, measurement),
+    do: Bee.Store.Measurements.record(conn, issue_id, seq, measurement)
+
+  defp normalize_update_attrs(attrs, issue_id, state) do
+    attrs = Map.new(attrs)
+
+    attrs =
+      case {Map.fetch(attrs, :type), Map.has_key?(attrs, :issue_type)} do
+        {{:ok, type}, false} -> attrs |> Map.delete(:type) |> Map.put(:issue_type, type)
+        _ -> Map.delete(attrs, :type)
+      end
+
+    attrs =
+      if Map.has_key?(attrs, :parent) do
+        Map.update!(attrs, :parent, &format_parent(&1, state.prefix))
+      else
+        attrs
+      end
+
+    with {:ok, attrs} <- normalize_metadata(attrs),
+         :ok <- validate_parent_update(attrs, issue_id, state.conn) do
+      {:ok, attrs}
+    end
+  end
+
+  defp normalize_metadata(attrs) do
+    case Map.fetch(attrs, :metadata) do
+      {:ok, metadata} ->
+        with {:ok, encoded} <- Bee.Store.Metadata.encode(metadata) do
+          {:ok, Map.put(attrs, :metadata, encoded)}
+        end
+
+      :error ->
+        {:ok, attrs}
+    end
+  end
+
+  defp validate_parent_update(attrs, issue_id, conn) do
+    case Map.fetch(attrs, :parent) do
+      {:ok, ^issue_id} ->
+        {:error, :self_parent}
+
+      {:ok, parent} when is_binary(parent) ->
+        if parent_cycle?(conn, parent, issue_id) do
+          {:error, :parent_cycle}
+        else
+          :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp parent_cycle?(conn, current_parent, target_id) do
+    case Bee.Store.issue_parent(conn, current_parent) do
+      {:ok, ^target_id} ->
+        true
+
+      {:ok, nil} ->
+        false
+
+      {:ok, next_parent} when is_binary(next_parent) ->
+        parent_cycle?(conn, next_parent, target_id)
+
+      _ ->
+        false
+    end
+  end
+
+  defp label_list(nil), do: []
+  defp label_list(label) when is_binary(label), do: [label]
+  defp label_list(labels) when is_list(labels), do: labels
+
+  defp maybe_seed_from_jsonl(_conn, nil, _prefix), do: :ok
+
+  defp maybe_seed_from_jsonl(conn, jsonl_path, prefix) do
+    with true <- File.exists?(jsonl_path),
+         {:ok, []} <- Bee.Store.list_issues_raw(conn) do
+      Logger.info("Seeding from #{jsonl_path}")
+      Bee.Export.import_jsonl(conn, jsonl_path, prefix)
+    else
+      false ->
+        :ok
+
+      {:ok, [_ | _]} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to check DB for seeding from #{jsonl_path}: #{inspect(reason)}")
+        :ok
+    end
+  end
+end
