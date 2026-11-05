@@ -16,6 +16,9 @@ jobs:
       - name: Content guard
         env:
           PUBLIC_GUARD_EXTRA: ${{ secrets.PUBLIC_GUARD_EXTRA }}
+          # Secrets are absent on pull requests from forks; there the built-in
+          # patterns still run, and the push to main afterwards runs the full set.
+          PUBLIC_GUARD_REQUIRE_EXTRA: ${{ ((github.event_name == 'push' && github.repository == 'fosferon/bee') || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '' }}
         run: bash scripts/public_guard.sh
       - name: Secret scan (full history)
         uses: gitleaks/gitleaks-action@v2
