@@ -45,7 +45,7 @@ fi
 list_files() { git ls-files -z | grep -zEv "$self" || true; }
 names=$(git -c core.quotePath=false ls-files | grep -Ev "$self" || true)
 
-artefacts=$(echo "$names" | grep -E '(^|/)(CLAUDE\.md|AGENTS\.md|\.claude/|\.serena/|_bmad[^/]*/|\.planning/|\.cursor/|\.swarm/)' || true)
+artefacts=$(echo "$names" | grep -E '(^|/)(CLAUDE\.md|AGENTS\.md|\.claude/|\.serena/|\.devman/|_bmad[^/]*/|\.planning/|\.cursor/|\.swarm/)' || true)
 papers=$(echo "$names" | grep -E '^[A-Z0-9_]+\.md$' | grep -Ev '^(README|CHANGELOG|LICENSE|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT|READINESS|DEVELOPMENT)\.md$' || true)
 if [[ -n "$artefacts$papers" ]]; then
   echo "public_guard: internal artefacts or working papers are tracked:"; printf "%s\n%s\n" "$artefacts" "$papers" | sed '/^$/d; s/^/  /'
