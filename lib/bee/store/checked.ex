@@ -2,7 +2,8 @@ defmodule Bee.Store.Checked do
   @moduledoc false
 
   # Statement helpers for writes that must fail as values, never as exceptions: every
-  # prepare, bind, columns and step error comes back as `{:error, reason}`, and the
+  # prepare, bind, columns and step error (including the driver's binding
+  # exceptions, see bind/2 below) comes back as `{:error, reason}`, and the
   # statement is released in `after` whatever happens. The keyed create and the
   # external-key lookup use them so a driver failure reaches the caller's transaction
   # (and its ROLLBACK) instead of crashing the writer.
@@ -51,7 +52,7 @@ defmodule Bee.Store.Checked do
     case Exqlite.Sqlite3.prepare(conn, sql) do
       {:ok, stmt} ->
         try do
-          case Exqlite.Sqlite3.bind(stmt, params) do
+          case bind(stmt, params) do
             :ok -> fun.(stmt)
             {:error, reason} -> {:error, reason}
           end
@@ -64,11 +65,23 @@ defmodule Bee.Store.Checked do
     end
   end
 
+  # Exqlite's bind/2 returns :ok or raises: ArgumentError for a parameter it cannot
+  # convert (an unsupported term, an integer outside signed 64 bits, a wrong
+  # parameter count) and Exqlite.Error when SQLite refuses a binding. Only those
+  # driver exceptions, and only from the bind call, become error values here.
+  defp bind(stmt, params) do
+    Exqlite.Sqlite3.bind(stmt, params)
+  rescue
+    error in [ArgumentError, Exqlite.Error] ->
+      {:error, {:bind_failed, Exception.message(error)}}
+  end
+
   defp collect(conn, stmt, acc) do
     case Exqlite.Sqlite3.step(conn, stmt) do
       {:row, row} -> collect(conn, stmt, [row | acc])
       :done -> {:ok, Enum.reverse(acc)}
       {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_step, other}}
     end
   end
 end

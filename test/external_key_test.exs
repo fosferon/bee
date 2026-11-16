@@ -477,6 +477,45 @@ defmodule Bee.ExternalKeyTest do
       assert %{labels: [["a"], ["b"]]} = rows_for(r, "#{@prefix}-#{issue.id}")
     end
 
+    # Exqlite's bind raises rather than returning an error. A priority it cannot bind
+    # reaches the driver at the issue INSERT, after the id has been allocated.
+    for {label, priority, message} <- [
+          {"an out-of-range integer", 9_223_372_036_854_775_808, "argument error"},
+          {"an unsupported value", %{unsupported: true}, "unsupported type"}
+        ] do
+      @bind_priority priority
+      @bind_message message
+      test "a binding failure from #{label} rolls the keyed create back", ctx do
+        r = export_ctx(ctx)
+        control = settle_control(r)
+        counter = next_counter(r)
+        totals = totals(r)
+        [[last_issued]] = counter
+
+        assert {:error, {:bind_failed, reason}} =
+                 Bee.create(
+                   "Bind failure",
+                   [external_key: "bind-failure", priority: @bind_priority, labels: ["a"]],
+                   r.repo
+                 )
+
+        assert reason =~ @bind_message
+        assert_alive(r)
+        assert next_counter(r) == counter
+        assert totals(r) == totals
+        assert %{issue: [], labels: [], events: []} = rows_for(r, "#{@prefix}-#{last_issued + 1}")
+        assert [] == keyed_rows(r, "bind-failure")
+        assert {:error, :not_found} = Bee.get_by_external_key("bind-failure", r.repo)
+        assert_no_side_effects(r, control)
+
+        # The writer transaction is idle again: the next keyed create takes the id the
+        # failed one gave back and commits, as a separate connection sees.
+        assert {:ok, after_issue} = Bee.create("After", [external_key: "after-bind"], r.repo)
+        assert after_issue.id == last_issued + 1
+        assert [["#{@prefix}-#{last_issued + 1}"]] == keyed_rows(r, "after-bind")
+      end
+    end
+
     # Each fault makes the real statement fail inside the SQLite driver, at prepare
     # or at step, after the transaction has begun; the writer must survive and roll
     # the whole create back.
