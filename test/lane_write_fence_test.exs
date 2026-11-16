@@ -53,6 +53,25 @@ defmodule Bee.LaneWriteFenceTest do
     assert {:ok, %{title: "Changed"}} = Bee.get(first.id, repo)
   end
 
+  test "external-key lookup is classified as a read and answered on a fenced server", %{
+    server: repo
+  } do
+    assert Bee.Store.LaneWriteFence.read?({:get_by_external_key, "k"})
+
+    refute {:get_by_external_key, "k"}
+           |> Bee.Store.LaneWriteFence.operation()
+           |> Kernel.in(Bee.Store.LaneWriteFence.mutations())
+
+    assert {:error, :not_found} = Bee.get_by_external_key("k", repo)
+    assert {:ok, issue} = Bee.create("Keyed", [external_key: "k"], repo)
+    assert {:ok, %{id: id, external_key: "k"}} = Bee.get_by_external_key("k", repo)
+    assert id == issue.id
+
+    # A read, so a lane binding on the issue does not refuse it.
+    assert {:ok, _} = link(repo, issue)
+    assert {:ok, %{id: ^id}} = Bee.get_by_external_key("k", repo)
+  end
+
   test "binding needs no request lane field to deny legacy writes", %{server: repo} do
     assert {:ok, issue} = Bee.create("Protected", [], repo)
     assert {:ok, _} = link(repo, issue)
