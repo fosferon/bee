@@ -9,8 +9,8 @@ defmodule Bee.TestSeam do
   # The package ships neither test/ nor any other definition of it, and the choice
   # is made here at compile time without reading application configuration. So when
   # bee is built as a dependency, whatever its parent configures, this module is the
-  # inert one: `put_state/2` leaves the Repo state unchanged, `fault/2` returns `:ok`
-  # and `observe_export/2` does nothing. The Repo options
+  # inert one: `put_state/2` leaves the Repo state unchanged, `sql/4` returns the
+  # statement it is given, and `observe_export/2` does nothing. The Repo options
   # `:store_fault` and `:export_observer` then have no effect.
 
   @impl_module (case Code.ensure_compiled(Bee.TestSupport.Seam) do
@@ -20,11 +20,11 @@ defmodule Bee.TestSeam do
 
   if @impl_module do
     defdelegate put_state(state, opts), to: @impl_module
-    defdelegate fault(seam, point), to: @impl_module
+    defdelegate sql(seam, point, sql, params), to: @impl_module
     defdelegate observe_export(seam, event), to: @impl_module
   else
     def put_state(state, _opts), do: state
-    def fault(_seam, _point), do: :ok
+    def sql(_seam, _point, sql, _params), do: sql
     def observe_export(_seam, _event), do: :ok
   end
 end

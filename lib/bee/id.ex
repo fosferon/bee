@@ -3,6 +3,13 @@ defmodule Bee.Id do
 
   @type id_input :: String.t() | integer() | nil
 
+  # The statement next/2 runs, shared verbatim with next_checked/3.
+  @next_sql """
+  INSERT INTO id_counter (prefix, next_id) VALUES (?, 1)
+  ON CONFLICT(prefix) DO UPDATE SET next_id = next_id + 1
+  RETURNING next_id
+  """
+
   @spec next(Exqlite.Sqlite3.db(), String.t()) :: String.t()
   def next(conn, prefix) do
     sql = """
@@ -16,6 +23,27 @@ defmodule Bee.Id do
     {:row, [id]} = Exqlite.Sqlite3.step(conn, stmt)
     Exqlite.Sqlite3.release(conn, stmt)
     "#{prefix}-#{id}"
+  end
+
+  @doc """
+  `next/2` with every statement checked: a driver failure is returned as
+  `{:error, reason}` rather than raised. Used by the keyed create; `next/2` is
+  unchanged. `seam` is the Repo's test seam (inert outside bee's own tests).
+  """
+  @spec next_checked(Exqlite.Sqlite3.db(), String.t(), term()) ::
+          {:ok, String.t()} | {:error, term()}
+  def next_checked(conn, prefix, seam \\ nil) do
+    params = [prefix]
+
+    case Bee.Store.Checked.scalars(
+           conn,
+           Bee.TestSeam.sql(seam, :id_allocation, @next_sql, params),
+           params
+         ) do
+      {:ok, [id]} -> {:ok, "#{prefix}-#{id}"}
+      {:ok, other} -> {:error, {:unexpected_rows, other}}
+      {:error, _} = error -> error
+    end
   end
 
   @spec current(Exqlite.Sqlite3.db(), String.t()) :: integer()

@@ -888,9 +888,8 @@ defmodule Bee.Repo do
   defp create_issue(title, opts, mode, _from, state) do
     result =
       transaction(state.conn, fn ->
-        id = Bee.Id.next(state.conn, state.prefix)
-
-        with {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
+        with {:ok, id} <- allocate_id(mode, state),
+             {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
           attrs =
             %{
               id: id,
@@ -907,15 +906,7 @@ defmodule Bee.Repo do
             |> put_create_key(mode, state)
 
           with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
-               :ok <- create_event_fault(mode, state),
-               {:ok, _seq} <-
-                 Bee.Store.Events.record(state.conn, id, "issue.created",
-                   actor: attrs.created_by,
-                   fields:
-                     attrs
-                     |> Map.take(create_event_fields(mode))
-                     |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
-                 ) do
+               {:ok, _seq} <- record_created(mode, state, id, attrs) do
             {:ok, {id, attrs, issue}}
           end
         end
@@ -945,6 +936,11 @@ defmodule Bee.Repo do
     end
   end
 
+  defp allocate_id(:legacy, state), do: {:ok, Bee.Id.next(state.conn, state.prefix)}
+
+  defp allocate_id({:strict, _key, _labels}, state),
+    do: Bee.Id.next_checked(state.conn, state.prefix, Map.get(state, :test_seam))
+
   defp create_labels(:legacy, opts),
     do: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label))
 
@@ -959,11 +955,6 @@ defmodule Bee.Repo do
     |> Map.put(:test_seam, Map.get(state, :test_seam))
   end
 
-  defp create_event_fault(:legacy, _state), do: :ok
-
-  defp create_event_fault({:strict, _key, _labels}, state),
-    do: Bee.TestSeam.fault(Map.get(state, :test_seam), :event_record)
-
   @create_event_fields [
     :id,
     :title,
@@ -976,8 +967,28 @@ defmodule Bee.Repo do
     :metadata
   ]
 
-  defp create_event_fields(:legacy), do: @create_event_fields
-  defp create_event_fields({:strict, _key, _labels}), do: @create_event_fields ++ [:external_key]
+  defp record_created(:legacy, state, id, attrs) do
+    Bee.Store.Events.record(state.conn, id, "issue.created",
+      actor: attrs.created_by,
+      fields:
+        attrs
+        |> Map.take(@create_event_fields)
+        |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
+    )
+  end
+
+  # The keyed create records its event with every statement checked, so a driver
+  # failure rolls the create back instead of crashing the writer.
+  defp record_created({:strict, _key, _labels}, state, id, attrs) do
+    Bee.Store.Events.record_checked(state.conn, id, "issue.created",
+      actor: attrs.created_by,
+      fields:
+        attrs
+        |> Map.take(@create_event_fields ++ [:external_key])
+        |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1),
+      test_seam: Map.get(state, :test_seam)
+    )
+  end
 
   # Strict mode: every label is a non-empty binary, else the index of the first
   # offending label in `labels ++ label` is reported and nothing is written.

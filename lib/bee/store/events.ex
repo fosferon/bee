@@ -3,6 +3,13 @@ defmodule Bee.Store.Events do
 
   @max_value_bytes 2_048
 
+  # The statements record/4 runs, shared verbatim with record_checked/4.
+  @sequence_sql "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE issue_id = ?"
+  @insert_sql """
+  INSERT INTO events (issue_id, seq, event_type, payload, actor, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  """
+
   @spec record(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
   def record(conn, issue_id, event_type, opts \\ []) do
@@ -30,6 +37,57 @@ defmodule Bee.Store.Events do
       {:ok, seq}
     end
   end
+
+  @doc """
+  `record/4` with every statement checked: a prepare, bind or step failure in the
+  sequence query, the event INSERT or the issue touch is returned as
+  `{:error, reason}`, never raised, so the caller's transaction rolls back. Used by
+  the keyed create; `record/4` itself is unchanged. `:test_seam` in `opts` is the
+  Repo's test seam (inert outside bee's own tests).
+  """
+  @spec record_checked(Exqlite.Sqlite3.db(), String.t(), String.t(), keyword()) ::
+          {:ok, pos_integer()} | {:error, term()}
+  def record_checked(conn, issue_id, event_type, opts \\ []) do
+    now = now_iso()
+    seam = Keyword.get(opts, :test_seam)
+    sequence_params = [issue_id]
+
+    with {:ok, [seq]} <-
+           Bee.Store.Checked.scalars(
+             conn,
+             Bee.TestSeam.sql(seam, :event_sequence, @sequence_sql, sequence_params),
+             sequence_params
+           ),
+         {:ok, payload} <- payload(opts, seq),
+         params = [
+           issue_id,
+           seq,
+           event_type,
+           Jason.encode!(payload),
+           Keyword.get(opts, :actor),
+           now
+         ],
+         :ok <-
+           Bee.Store.Checked.exec(
+             conn,
+             Bee.TestSeam.sql(seam, :event_insert, @insert_sql, params),
+             params
+           ),
+         :ok <- touch_issue_checked(conn, issue_id, event_type, now) do
+      {:ok, seq}
+    end
+  end
+
+  defp touch_issue_checked(_conn, _issue_id, event_type, _now)
+       when event_type in ["issue.created", "issue.project_backfilled"],
+       do: :ok
+
+  defp touch_issue_checked(conn, issue_id, _event_type, now),
+    do:
+      Bee.Store.Checked.exec(conn, "UPDATE issues SET updated_at = ? WHERE id = ?", [
+        now,
+        issue_id
+      ])
 
   # Creation already writes the issue timestamp in the same transaction. Avoid a
   # second timestamp that would make the issue returned by create immediately stale.

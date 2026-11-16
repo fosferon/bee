@@ -401,19 +401,30 @@ defmodule Bee.ExternalKeyTest do
       assert looked_up.id == created.id
     end
 
-    test "a store failure is a store error, never :not_found", ctx do
-      r =
-        start_repo(ctx,
-          name: :"bee_extkey_fault_#{System.unique_integer([:positive])}",
-          lane_write_fence: true,
-          store_fault: :lookup
-        )
+    for mode <- [:prepare, :step] do
+      @mode mode
+      test "a #{mode} failure in the lookup is a store error, never :not_found", ctx do
+        r = fenced_fault_repo(ctx, {:lookup, @mode})
+        assert {:ok, _} = Bee.create("Present", [external_key: "present"], r.repo)
 
-      assert {:ok, _} = Bee.create("Present", [external_key: "present"], r.repo)
+        for key <- ["present", "absent"] do
+          assert {:error, {:store_error, reason}} = Bee.get_by_external_key(key, r.repo)
+          assert reason =~ driver_error(@mode)
+        end
 
-      for key <- ["present", "absent"] do
-        assert {:error, {:store_error, "injected store fault: lookup"}} =
-                 Bee.get_by_external_key(key, r.repo)
+        assert_alive(r)
+      end
+
+      test "a #{mode} failure hydrating the found row is a store error", ctx do
+        r = fenced_fault_repo(ctx, {:hydration, @mode})
+        # The key is written through a second, fault-free writer on the same file.
+        clean = start_repo(ctx, db_path: r.db_path)
+        assert {:ok, _} = Bee.create("Present", [external_key: "present"], clean.repo)
+
+        assert {:error, {:store_error, reason}} = Bee.get_by_external_key("present", r.repo)
+        assert reason =~ driver_error(@mode)
+        assert {:error, :not_found} = Bee.get_by_external_key("absent", r.repo)
+        assert_alive(r)
       end
     end
   end
@@ -466,10 +477,22 @@ defmodule Bee.ExternalKeyTest do
       assert %{labels: [["a"], ["b"]]} = rows_for(r, "#{@prefix}-#{issue.id}")
     end
 
-    for point <- [:label_insert, :event_record, :issue_insert] do
+    # Each fault makes the real statement fail inside the SQLite driver, at prepare
+    # or at step, after the transaction has begun; the writer must survive and roll
+    # the whole create back.
+    for point <- [
+          :id_allocation,
+          :issue_insert,
+          :label_insert,
+          :event_sequence,
+          :event_insert,
+          :hydration
+        ],
+        mode <- [:prepare, :step] do
       @point point
-      test "a fault at #{point} rolls the whole create back", ctx do
-        r = export_ctx(ctx, store_fault: @point)
+      @mode mode
+      test "a #{mode} failure at #{point} rolls the whole create back", ctx do
+        r = export_ctx(ctx, store_fault: {@point, @mode})
         control = settle_control(r)
         counter = next_counter(r)
         totals = totals(r)
@@ -478,7 +501,8 @@ defmodule Bee.ExternalKeyTest do
         assert {:error, reason} =
                  Bee.create("Faulty", [external_key: "faulty", labels: ["a", "b"]], r.repo)
 
-        assert reason == "injected store fault: #{@point}"
+        assert is_binary(reason) and reason =~ driver_error(@mode)
+        assert_alive(r)
         assert next_counter(r) == counter
         assert totals(r) == totals
         assert %{issue: [], labels: [], events: []} = rows_for(r, "#{@prefix}-#{last_issued + 1}")
@@ -487,6 +511,24 @@ defmodule Bee.ExternalKeyTest do
         assert_no_side_effects(r, control)
       end
     end
+  end
+
+  defp driver_error(:prepare), do: "syntax error"
+  defp driver_error(:step), do: "integer overflow"
+
+  defp fenced_fault_repo(ctx, fault) do
+    start_repo(ctx,
+      name: :"bee_extkey_fault_#{System.unique_integer([:positive])}",
+      lane_write_fence: true,
+      store_fault: fault
+    )
+  end
+
+  # The same Repo process is still registered and answers a later call.
+  defp assert_alive(r) do
+    assert GenServer.whereis(r.repo) == r.pid
+    assert Process.alive?(r.pid)
+    assert {:ok, _} = Bee.list([], r.repo)
   end
 
   defp wait_for_queue(pid, n) do

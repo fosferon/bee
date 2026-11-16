@@ -1,6 +1,8 @@
 defmodule Bee.Store do
   @moduledoc false
 
+  alias Bee.Store.Checked
+
   @order_columns ~w(created_at updated_at priority id)a
 
   # Issue ids are TEXT of the form "<prefix>-<n>", so plain SQL ordering is
@@ -239,25 +241,22 @@ defmodule Bee.Store do
       Map.fetch!(attrs, :external_key)
     ]
 
-    with :ok <- Bee.TestSeam.fault(seam, :issue_insert),
-         :ok <- checked_exec(conn, sql, params),
+    with :ok <- Checked.exec(conn, Bee.TestSeam.sql(seam, :issue_insert, sql, params), params),
          :ok <- insert_labels_strictly(conn, id, Map.get(attrs, :labels, []), seam) do
-      get_issue(conn, id)
+      get_issue_checked(conn, id, seam)
     end
   end
 
   defp insert_labels_strictly(conn, issue_id, labels, seam) do
+    sql =
+      "INSERT INTO issue_labels (issue_id, label) VALUES (?, ?) " <>
+        "ON CONFLICT(issue_id, label) DO NOTHING"
+
     Enum.reduce_while(labels, :ok, fn label, :ok ->
-      with :ok <- Bee.TestSeam.fault(seam, :label_insert),
-           :ok <-
-             checked_exec(
-               conn,
-               "INSERT INTO issue_labels (issue_id, label) VALUES (?, ?) " <>
-                 "ON CONFLICT(issue_id, label) DO NOTHING",
-               [issue_id, label]
-             ) do
-        {:cont, :ok}
-      else
+      params = [issue_id, label]
+
+      case Checked.exec(conn, Bee.TestSeam.sql(seam, :label_insert, sql, params), params) do
+        :ok -> {:cont, :ok}
         {:error, _} = error -> {:halt, error}
       end
     end)
@@ -271,62 +270,87 @@ defmodule Bee.Store do
   @spec get_issue_by_external_key(Exqlite.Sqlite3.db(), String.t(), term()) ::
           {:ok, map()} | {:error, :not_found} | {:error, {:store_error, term()}}
   def get_issue_by_external_key(conn, key, seam \\ nil) do
-    with :ok <- Bee.TestSeam.fault(seam, :lookup),
-         {:ok, ids} <-
-           checked_scalars(conn, "SELECT id FROM issues WHERE external_key = ?", [key]) do
-      case ids do
-        [] ->
-          {:error, :not_found}
+    sql = Bee.TestSeam.sql(seam, :lookup, "SELECT id FROM issues WHERE external_key = ?", [key])
 
-        [id] ->
-          case get_issue(conn, id) do
-            {:ok, issue} -> {:ok, Map.put(issue, :external_key, key)}
-            {:error, :not_found} -> {:error, {:store_error, :unrepresentable_row}}
-          end
+    case Checked.scalars(conn, sql, [key]) do
+      {:ok, []} ->
+        {:error, :not_found}
 
-        [_ | _] ->
-          {:error, {:store_error, :duplicate_external_key}}
-      end
-    else
-      {:error, reason} -> {:error, {:store_error, reason}}
+      {:ok, [id]} ->
+        case get_issue_checked(conn, id, seam) do
+          {:ok, issue} -> {:ok, Map.put(issue, :external_key, key)}
+          {:error, :not_found} -> {:error, {:store_error, :unrepresentable_row}}
+          {:error, reason} -> {:error, {:store_error, reason}}
+        end
+
+      {:ok, [_ | _]} ->
+        {:error, {:store_error, :duplicate_external_key}}
+
+      {:error, reason} ->
+        {:error, {:store_error, reason}}
     end
   rescue
+    # Backstop for a non-driver failure, such as undecodable stored metadata.
     error -> {:error, {:store_error, error}}
   end
 
-  defp checked_exec(conn, sql, params) do
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(conn, sql) do
-      try do
-        with :ok <- Exqlite.Sqlite3.bind(stmt, params) do
-          case Exqlite.Sqlite3.step(conn, stmt) do
-            :done -> :ok
-            {:error, reason} -> {:error, reason}
-            other -> {:error, {:unexpected_step, other}}
-          end
-        end
-      after
-        Exqlite.Sqlite3.release(conn, stmt)
-      end
+  # `get_issue/2`'s projection (no comments loaded) with every statement checked:
+  # the same queries, but a driver failure is returned as `{:error, reason}` instead
+  # of raising, so a keyed create rolls back and a lookup reports a store error.
+  defp get_issue_checked(conn, id, seam) do
+    params = [id]
+    sql = Bee.TestSeam.sql(seam, :hydration, "SELECT * FROM issues WHERE id = ?", params)
+
+    case Checked.rows(conn, sql, params) do
+      {:ok, []} -> {:error, :not_found}
+      {:ok, [{cols, row} | _]} -> enrich_issue_checked(conn, row_to_issue(cols, row))
+      {:error, _} = error -> error
     end
   end
 
-  defp checked_scalars(conn, sql, params) do
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(conn, sql) do
-      try do
-        with :ok <- Exqlite.Sqlite3.bind(stmt, params) do
-          checked_scalar_loop(conn, stmt, [])
-        end
-      after
-        Exqlite.Sqlite3.release(conn, stmt)
-      end
-    end
-  end
+  defp enrich_issue_checked(conn, issue) do
+    case Bee.Id.parse(issue.id) do
+      {:error, :invalid_id} ->
+        warn_unparseable("issue row", issue.id)
+        {:error, :not_found}
 
-  defp checked_scalar_loop(conn, stmt, acc) do
-    case Exqlite.Sqlite3.step(conn, stmt) do
-      {:row, [value]} -> checked_scalar_loop(conn, stmt, [value | acc])
-      :done -> {:ok, Enum.reverse(acc)}
-      {:error, reason} -> {:error, reason}
+      {:ok, numeric_id} ->
+        raw_id = issue.id
+
+        with {:ok, labels} <-
+               Checked.scalars(conn, "SELECT label FROM issue_labels WHERE issue_id = ?", [raw_id]),
+             {:ok, lock_rows} <-
+               Checked.rows(conn, "SELECT * FROM locks WHERE issue_id = ?", [raw_id]),
+             {:ok, blocked_by} <-
+               Checked.scalars(
+                 conn,
+                 "SELECT depends_on_id FROM dependencies WHERE issue_id = ?",
+                 [raw_id]
+               ),
+             {:ok, blocks} <-
+               Checked.scalars(
+                 conn,
+                 "SELECT issue_id FROM dependencies WHERE depends_on_id = ?",
+                 [raw_id]
+               ) do
+          lock =
+            case lock_rows do
+              [{cols, row} | _] -> lock_from_row(cols, row)
+              [] -> nil
+            end
+
+          {:ok,
+           Map.merge(issue, %{
+             id: numeric_id,
+             labels: labels,
+             blocked_by: parse_id_refs(blocked_by, "blocked_by", raw_id),
+             blocks: parse_id_refs(blocks, "blocks", raw_id),
+             parent: parse_parent_ref(issue.parent, raw_id),
+             locked: lock != nil,
+             lock: lock,
+             comments: :not_loaded
+           })}
+        end
     end
   end
 
@@ -1438,6 +1462,16 @@ defmodule Bee.Store do
         "a merge tool, or a manual repair). The row is excluded from this " <>
         "result; the rest of the read is unaffected."
     )
+  end
+
+  defp lock_from_row(cols, row) do
+    map = Enum.zip(cols, row) |> Map.new()
+
+    %{
+      locked_by: map["locked_by"],
+      locked_at: map["locked_at"],
+      expires_at: map["expires_at"]
+    }
   end
 
   defp get_lock_info(conn, issue_id) do
