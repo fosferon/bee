@@ -1,37 +1,27 @@
 defmodule Bee.TestSeam do
   @moduledoc false
 
-  # Fault injection and export observation for bee's own test suite.
+  # Fault injection and export observation for bee's own test suite, inert everywhere
+  # else.
   #
-  # The working clauses are compiled in only when `config :bee, test_faults: true` is
-  # set at compile time, which bee's config/config.exs does for its test environment
-  # alone. In every other build, including bee compiled as a dependency, `put_state/2`
-  # leaves the Repo state untouched and the other functions are constant no-ops, so
-  # neither a `:store_fault` nor an `:export_observer` option has any effect.
-  #
-  # Fault points: `:issue_insert`, `:label_insert` and `:event_record` on a keyed
-  # create, and `:lookup` on `{:get_by_external_key, key}`. The observer pid receives
-  # `{:bee_test_export, :scheduled | :flushed}`.
+  # The working implementation, `Bee.TestSupport.Seam`, lives in test/support and is
+  # compiled only by bee's own test build (`elixirc_paths(:test)` in bee's mix.exs).
+  # The package ships neither test/ nor any other definition of it, and the choice
+  # is made here at compile time without reading application configuration. So when
+  # bee is built as a dependency, whatever its parent configures, this module is the
+  # inert one: `put_state/2` leaves the Repo state unchanged, `fault/2` returns `:ok`
+  # and `observe_export/2` does nothing. The Repo options
+  # `:store_fault` and `:export_observer` then have no effect.
 
-  @enabled Application.compile_env(:bee, :test_faults, false)
+  @impl_module (case Code.ensure_compiled(Bee.TestSupport.Seam) do
+                  {:module, module} -> module
+                  {:error, _} -> nil
+                end)
 
-  if @enabled do
-    def put_state(state, opts) do
-      Map.put(state, :test_seam, %{
-        store_fault: Keyword.get(opts, :store_fault),
-        export_observer: Keyword.get(opts, :export_observer)
-      })
-    end
-
-    def fault(%{store_fault: point}, point), do: {:error, "injected store fault: #{point}"}
-    def fault(_seam, _point), do: :ok
-
-    def observe_export(%{export_observer: pid}, event) when is_pid(pid) do
-      send(pid, {:bee_test_export, event})
-      :ok
-    end
-
-    def observe_export(_seam, _event), do: :ok
+  if @impl_module do
+    defdelegate put_state(state, opts), to: @impl_module
+    defdelegate fault(seam, point), to: @impl_module
+    defdelegate observe_export(seam, event), to: @impl_module
   else
     def put_state(state, _opts), do: state
     def fault(_seam, _point), do: :ok
