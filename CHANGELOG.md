@@ -111,5 +111,6 @@ First public release.
 - **Import / export** — JSONL export (debounced, flushed on orderly shutdown) and
   `import_jsonl/1`, with first-boot seeding from an empty database.
 
-[Unreleased]: https://github.com/fosferon/bee/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/fosferon/bee/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/fosferon/bee/releases/tag/v0.3.1
 [0.3.0]: https://github.com/fosferon/bee/releases/tag/v0.3.0
