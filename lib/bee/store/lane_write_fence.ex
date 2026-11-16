@@ -8,7 +8,7 @@ defmodule Bee.Store.LaneWriteFence do
   absent lane field in a request is never evidence that its targets are neutral.
   """
 
-  @reads ~w(get get_comments list count query ancestors ask list_intents list_measures tree_page ready traverse candidates list_projects list_agents who_blocks_whom agent_load critical_path rollup bottlenecks prefix reconcile_lane_issue)a
+  @reads ~w(get get_comments list count query ancestors ask list_intents list_measures tree_page ready traverse candidates list_projects list_agents who_blocks_whom agent_load critical_path rollup bottlenecks prefix reconcile_lane_issue get_by_external_key)a
   @mutations ~w(create update comment block unblock lock unlock assign measure register_project register_agent join_project register_measure register_intent remove_intent import_jsonl sweep_expired_locks upsert_project_registry backfill_projects)a
 
   def reads, do: @reads

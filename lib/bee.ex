@@ -278,14 +278,50 @@ defmodule Bee do
 
   Supported options: `:description`, `:priority` (integer), `:issue_type` (or `:type`,
   default `"task"`), `:labels` / `:label`, `:parent` (an issue id), `:project_id`,
-  `:actor` (the creator), and `:metadata` (a map; reserved prefixes are `bee:` and `_`).
+  `:actor` (the creator), `:metadata` (a map; reserved prefixes are `bee:` and `_`), and
+  `:external_key`.
+
+  `:external_key` is an optional caller-chosen key: 1 to 200 bytes of printable ASCII
+  without whitespace. It is stored atomically with the issue, unique among issues that
+  carry one, and immutable afterwards; `get_by_external_key/2` finds the issue by it.
+  With a key:
+
+    * an invalid key returns `{:error, {:invalid_external_key, reason}}` and allocates
+      no id;
+    * a key another issue already carries returns `{:error, :external_key_conflict}`
+      and writes nothing;
+    * every label must be a non-empty string, else `{:error, {:invalid_label, index}}`;
+      duplicate labels are accepted once each, and any database error while writing
+      the issue, a label or its creation event rolls the whole create back.
+
+  Without the option, or with `external_key: nil`, create behaves exactly as before.
   """
   def create(title, opts \\ [], server \\ @default_server),
     do: GenServer.call(server, {:create, title, opts})
 
   @doc """
+  Finds the issue created with `external_key`.
+
+  Returns `{:ok, issue}` (the `get/2` projection plus `:external_key`),
+  `{:error, :not_found}` when no issue carries the key,
+  `{:error, {:invalid_external_key, reason}}` for a malformed key, or
+  `{:error, {:store_error, reason}}` when the database fails; a store error is never
+  reported as `:not_found`.
+
+  The lookup is answered by the `Bee.Repo` process on its writer connection, in
+  mailbox order: a lookup sent after a create observes that create's outcome. It is a
+  read under the lane write fence.
+  """
+  @spec get_by_external_key(String.t(), GenServer.server()) ::
+          {:ok, map()} | {:error, :not_found} | {:error, term()}
+  def get_by_external_key(key, server \\ @default_server),
+    do: GenServer.call(server, {:get_by_external_key, key})
+
+  @doc """
   Updates an issue with a map of attributes. Returns `:ok` or
-  `{:error, :not_found | :self_parent | :parent_cycle}`.
+  `{:error, :not_found | :self_parent | :parent_cycle}`. An `:external_key` (or
+  `"external_key"`) attribute is refused with `{:error, {:immutable_field, :external_key}}`
+  and nothing is written.
 
   A `:measure` key may be folded into the update to record a measurement atomically
   with the status change that earned it.

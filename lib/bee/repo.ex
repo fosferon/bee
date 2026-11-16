@@ -87,19 +87,22 @@ defmodule Bee.Repo do
         register_reader(Keyword.get(opts, :name, __MODULE__), pool_name, prefix)
 
         {:ok,
-         %{
-           conn: conn,
-           dep_graph: dep_graph,
-           alloc_graph: alloc_graph,
-           prefix: prefix,
-           jsonl_path: jsonl_path,
-           lane_write_fence: Keyword.get(opts, :lane_write_fence, false),
-           export_mode: :on_write,
-           db_path: db_path,
-           pool_pid: pool_pid,
-           pool_name: pool_name,
-           export_timer: nil
-         }}
+         Bee.TestSeam.put_state(
+           %{
+             conn: conn,
+             dep_graph: dep_graph,
+             alloc_graph: alloc_graph,
+             prefix: prefix,
+             jsonl_path: jsonl_path,
+             lane_write_fence: Keyword.get(opts, :lane_write_fence, false),
+             export_mode: :on_write,
+             db_path: db_path,
+             pool_pid: pool_pid,
+             pool_name: pool_name,
+             export_timer: nil
+           },
+           opts
+         )}
 
       {:error, reason} ->
         {:stop, reason}
@@ -183,58 +186,23 @@ defmodule Bee.Repo do
 
   defp handle_request(:conn, _from, state), do: {:reply, state.conn, state}
 
-  defp handle_request({:create, title, opts}, _from, state) do
-    result =
-      transaction(state.conn, fn ->
-        id = Bee.Id.next(state.conn, state.prefix)
-
-        with {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
-          attrs = %{
-            id: id,
-            title: title,
-            description: Keyword.get(opts, :description),
-            priority: Keyword.get(opts, :priority),
-            issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
-            labels: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label)),
-            parent: format_parent(Keyword.get(opts, :parent), state.prefix),
-            project_id: Keyword.get(opts, :project_id),
-            created_by: Keyword.get(opts, :actor),
-            metadata: metadata
-          }
-
-          with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
-               {:ok, _seq} <-
-                 Bee.Store.Events.record(state.conn, id, "issue.created",
-                   actor: attrs.created_by,
-                   fields:
-                     attrs
-                     |> Map.take([
-                       :id,
-                       :title,
-                       :description,
-                       :priority,
-                       :issue_type,
-                       :parent,
-                       :project_id,
-                       :created_by,
-                       :metadata
-                     ])
-                     |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
-                 ) do
-            {:ok, {id, attrs, issue}}
-          end
-        end
-      end)
-
-    case result do
-      {:ok, {id, attrs, issue}} ->
-        Bee.Graph.add_vertex(state.dep_graph, id)
-        Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
-        {:reply, {:ok, issue}, schedule_export(state)}
-
-      {:error, reason} ->
-        {:reply, {:error, classify_write_error(reason)}, state}
+  # A create without `:external_key`, or with `external_key: nil`, takes the legacy
+  # path unchanged. A non-nil key is validated, and selects strict label handling and
+  # checked writes, before the transaction starts, so a refusal allocates no id.
+  defp handle_request({:create, title, opts}, from, state) do
+    case create_mode(opts) do
+      {:ok, mode} -> create_issue(title, opts, mode, from, state)
+      {:error, _} = error -> {:reply, error, state}
     end
+  end
+
+  defp handle_request({:get_by_external_key, key}, _from, state) do
+    result =
+      with :ok <- Bee.Store.validate_external_key(key) do
+        Bee.Store.get_issue_by_external_key(state.conn, key, Map.get(state, :test_seam))
+      end
+
+    {:reply, result, state}
   end
 
   defp handle_request({:get, id}, _from, state) do
@@ -917,6 +885,124 @@ defmodule Bee.Repo do
 
   # --- Helpers ---
 
+  defp create_issue(title, opts, mode, _from, state) do
+    result =
+      transaction(state.conn, fn ->
+        id = Bee.Id.next(state.conn, state.prefix)
+
+        with {:ok, metadata} <- Bee.Store.Metadata.encode(Keyword.get(opts, :metadata, %{})) do
+          attrs =
+            %{
+              id: id,
+              title: title,
+              description: Keyword.get(opts, :description),
+              priority: Keyword.get(opts, :priority),
+              issue_type: Keyword.get(opts, :issue_type) || Keyword.get(opts, :type, "task"),
+              labels: create_labels(mode, opts),
+              parent: format_parent(Keyword.get(opts, :parent), state.prefix),
+              project_id: Keyword.get(opts, :project_id),
+              created_by: Keyword.get(opts, :actor),
+              metadata: metadata
+            }
+            |> put_create_key(mode, state)
+
+          with {:ok, issue} <- Bee.Store.insert_issue(state.conn, attrs),
+               :ok <- create_event_fault(mode, state),
+               {:ok, _seq} <-
+                 Bee.Store.Events.record(state.conn, id, "issue.created",
+                   actor: attrs.created_by,
+                   fields:
+                     attrs
+                     |> Map.take(create_event_fields(mode))
+                     |> Map.update!(:metadata, &Bee.Store.Metadata.decode/1)
+                 ) do
+            {:ok, {id, attrs, issue}}
+          end
+        end
+      end)
+
+    case result do
+      {:ok, {id, attrs, issue}} ->
+        Bee.Graph.add_vertex(state.dep_graph, id)
+        Bee.World.add_issue(state.alloc_graph, id, attrs.project_id)
+        {:reply, {:ok, issue}, schedule_export(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, classify_write_error(reason)}, state}
+    end
+  end
+
+  defp create_mode(opts) do
+    case Keyword.get(opts, :external_key) do
+      nil ->
+        {:ok, :legacy}
+
+      key ->
+        with :ok <- Bee.Store.validate_external_key(key),
+             {:ok, labels} <- strict_labels(opts) do
+          {:ok, {:strict, key, labels}}
+        end
+    end
+  end
+
+  defp create_labels(:legacy, opts),
+    do: Keyword.get(opts, :labels, []) ++ label_list(Keyword.get(opts, :label))
+
+  defp create_labels({:strict, _key, labels}, _opts), do: labels
+
+  defp put_create_key(attrs, :legacy, _state), do: attrs
+
+  defp put_create_key(attrs, {:strict, key, _labels}, state) do
+    attrs
+    |> Map.put(:external_key, key)
+    |> Map.put(:strict?, true)
+    |> Map.put(:test_seam, Map.get(state, :test_seam))
+  end
+
+  defp create_event_fault(:legacy, _state), do: :ok
+
+  defp create_event_fault({:strict, _key, _labels}, state),
+    do: Bee.TestSeam.fault(Map.get(state, :test_seam), :event_record)
+
+  @create_event_fields [
+    :id,
+    :title,
+    :description,
+    :priority,
+    :issue_type,
+    :parent,
+    :project_id,
+    :created_by,
+    :metadata
+  ]
+
+  defp create_event_fields(:legacy), do: @create_event_fields
+  defp create_event_fields({:strict, _key, _labels}), do: @create_event_fields ++ [:external_key]
+
+  # Strict mode: every label is a non-empty binary, else the index of the first
+  # offending label in `labels ++ label` is reported and nothing is written.
+  defp strict_labels(opts) do
+    labels = Keyword.get(opts, :labels, [])
+
+    single =
+      case Keyword.get(opts, :label) do
+        nil -> []
+        list when is_list(list) -> list
+        label -> [label]
+      end
+
+    if is_list(labels) do
+      all = labels ++ single
+
+      case Enum.find_index(all, &(not (is_binary(&1) and &1 != ""))) do
+        nil -> {:ok, all}
+        index -> {:error, {:invalid_label, index}}
+      end
+    else
+      {:error, {:invalid_label, :labels}}
+    end
+  end
+
   defp qualify_owner_write(%{lane_write_fence: false}, _request), do: :ok
 
   defp qualify_owner_write(state, request) do
@@ -1028,6 +1114,7 @@ defmodule Bee.Repo do
 
     # Schedule a new flush after the debounce period
     timer = Process.send_after(self(), :flush_export, @export_debounce_ms)
+    Bee.TestSeam.observe_export(Map.get(state, :test_seam), :scheduled)
     %{state | export_timer: timer}
   end
 
@@ -1047,11 +1134,15 @@ defmodule Bee.Repo do
         end
       end)
 
-    case Task.yield(task, @export_flush_bound_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, :ok} -> :ok
-      nil -> {:error, :flush_bound_exceeded}
-      {:exit, reason} -> {:error, {:export_crashed, reason}}
-    end
+    result =
+      case Task.yield(task, @export_flush_bound_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, :ok} -> :ok
+        nil -> {:error, :flush_bound_exceeded}
+        {:exit, reason} -> {:error, {:export_crashed, reason}}
+      end
+
+    Bee.TestSeam.observe_export(Map.get(state, :test_seam), :flushed)
+    result
   end
 
   defp schedule_checkpoint do
@@ -1075,8 +1166,15 @@ defmodule Bee.Repo do
   # issue). Translate that raw driver error into a structured `:not_found` so
   # callers get a clean not-found instead of a crashed GenServer. Structured
   # atoms (`:already_locked`, `:cycle`) and any other reason pass through.
+  #
+  # The partial unique index on issues.external_key reports a reused key; that is a
+  # typed conflict, and it carries no id of the issue holding the key.
   defp classify_write_error(reason) when is_binary(reason) do
-    if reason =~ ~r/FOREIGN KEY/i, do: :not_found, else: reason
+    cond do
+      reason =~ "UNIQUE constraint failed: issues.external_key" -> :external_key_conflict
+      reason =~ ~r/FOREIGN KEY/i -> :not_found
+      true -> reason
+    end
   end
 
   defp classify_write_error(reason), do: reason
@@ -1219,6 +1317,16 @@ defmodule Bee.Repo do
   defp normalize_update_attrs(attrs, issue_id, state) do
     attrs = Map.new(attrs)
 
+    # `external_key` is a creation receipt: refused rather than ignored, so no caller
+    # can believe it re-keyed an issue. The update column list never names it either.
+    if is_map_key(attrs, :external_key) or is_map_key(attrs, "external_key") do
+      {:error, {:immutable_field, :external_key}}
+    else
+      normalize_mutable_update_attrs(attrs, issue_id, state)
+    end
+  end
+
+  defp normalize_mutable_update_attrs(attrs, issue_id, state) do
     attrs =
       case {Map.fetch(attrs, :type), Map.has_key?(attrs, :issue_type)} do
         {{:ok, type}, false} -> attrs |> Map.delete(:type) |> Map.put(:issue_type, type)

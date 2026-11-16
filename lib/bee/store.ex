@@ -146,7 +146,35 @@ defmodule Bee.Store do
 
   # --- Issue CRUD ---
 
-  @spec insert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()}
+  @external_key_max_bytes 200
+
+  @doc """
+  Validates an external key: a binary of 1..200 bytes of printable ASCII (`0x21..0x7E`,
+  so no whitespace). `nil` is not a key and is not accepted here; callers treat it as
+  an absent option before validating.
+  """
+  @spec validate_external_key(term()) :: :ok | {:error, {:invalid_external_key, atom()}}
+  def validate_external_key(key) when is_binary(key) do
+    cond do
+      key == "" -> {:error, {:invalid_external_key, :empty}}
+      byte_size(key) > @external_key_max_bytes -> {:error, {:invalid_external_key, :too_long}}
+      not printable_ascii?(key) -> {:error, {:invalid_external_key, :invalid_characters}}
+      true -> :ok
+    end
+  end
+
+  def validate_external_key(_key), do: {:error, {:invalid_external_key, :not_a_binary}}
+
+  defp printable_ascii?(<<>>), do: true
+
+  defp printable_ascii?(<<byte, rest::binary>>) when byte in 0x21..0x7E,
+    do: printable_ascii?(rest)
+
+  defp printable_ascii?(_), do: false
+
+  @spec insert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()} | {:error, term()}
+  def insert_issue(conn, %{strict?: true} = attrs), do: insert_keyed_issue(conn, attrs)
+
   def insert_issue(conn, attrs) do
     now = now_iso()
     id = Map.fetch!(attrs, :id)
@@ -177,6 +205,129 @@ defmodule Bee.Store do
     Enum.each(labels, fn label -> insert_label(conn, id, label) end)
 
     get_issue(conn, id)
+  end
+
+  # The keyed create: the issue INSERT names external_key, labels are written with a
+  # duplicate-only conflict clause, and every result is checked, so the first error
+  # aborts the caller's transaction instead of leaving a partially labelled issue.
+  defp insert_keyed_issue(conn, attrs) do
+    now = now_iso()
+    id = Map.fetch!(attrs, :id)
+    seam = Map.get(attrs, :test_seam)
+
+    sql = """
+    INSERT INTO issues (id, title, description, status, priority, issue_type,
+                        project_id, assigned_to, parent, created_at, created_by, updated_at, metadata,
+                        external_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    params = [
+      id,
+      Map.fetch!(attrs, :title),
+      Map.get(attrs, :description),
+      Map.get(attrs, :status, "open"),
+      Map.get(attrs, :priority),
+      Map.get(attrs, :issue_type, "task"),
+      Map.get(attrs, :project_id),
+      Map.get(attrs, :assigned_to),
+      Map.get(attrs, :parent),
+      Map.get(attrs, :created_at, now),
+      Map.get(attrs, :created_by),
+      now,
+      Map.get(attrs, :metadata, "{}"),
+      Map.fetch!(attrs, :external_key)
+    ]
+
+    with :ok <- Bee.TestSeam.fault(seam, :issue_insert),
+         :ok <- checked_exec(conn, sql, params),
+         :ok <- insert_labels_strictly(conn, id, Map.get(attrs, :labels, []), seam) do
+      get_issue(conn, id)
+    end
+  end
+
+  defp insert_labels_strictly(conn, issue_id, labels, seam) do
+    Enum.reduce_while(labels, :ok, fn label, :ok ->
+      with :ok <- Bee.TestSeam.fault(seam, :label_insert),
+           :ok <-
+             checked_exec(
+               conn,
+               "INSERT INTO issue_labels (issue_id, label) VALUES (?, ?) " <>
+                 "ON CONFLICT(issue_id, label) DO NOTHING",
+               [issue_id, label]
+             ) do
+        {:cont, :ok}
+      else
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  @doc """
+  Looks an issue up by its external key on the given connection. Returns the issue in
+  the `get_issue/2` projection plus `external_key`, `{:error, :not_found}` only when no
+  row carries the key, or `{:error, {:store_error, reason}}` on any SQLite failure.
+  """
+  @spec get_issue_by_external_key(Exqlite.Sqlite3.db(), String.t(), term()) ::
+          {:ok, map()} | {:error, :not_found} | {:error, {:store_error, term()}}
+  def get_issue_by_external_key(conn, key, seam \\ nil) do
+    with :ok <- Bee.TestSeam.fault(seam, :lookup),
+         {:ok, ids} <-
+           checked_scalars(conn, "SELECT id FROM issues WHERE external_key = ?", [key]) do
+      case ids do
+        [] ->
+          {:error, :not_found}
+
+        [id] ->
+          case get_issue(conn, id) do
+            {:ok, issue} -> {:ok, Map.put(issue, :external_key, key)}
+            {:error, :not_found} -> {:error, {:store_error, :unrepresentable_row}}
+          end
+
+        [_ | _] ->
+          {:error, {:store_error, :duplicate_external_key}}
+      end
+    else
+      {:error, reason} -> {:error, {:store_error, reason}}
+    end
+  rescue
+    error -> {:error, {:store_error, error}}
+  end
+
+  defp checked_exec(conn, sql, params) do
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(conn, sql) do
+      try do
+        with :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+          case Exqlite.Sqlite3.step(conn, stmt) do
+            :done -> :ok
+            {:error, reason} -> {:error, reason}
+            other -> {:error, {:unexpected_step, other}}
+          end
+        end
+      after
+        Exqlite.Sqlite3.release(conn, stmt)
+      end
+    end
+  end
+
+  defp checked_scalars(conn, sql, params) do
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(conn, sql) do
+      try do
+        with :ok <- Exqlite.Sqlite3.bind(stmt, params) do
+          checked_scalar_loop(conn, stmt, [])
+        end
+      after
+        Exqlite.Sqlite3.release(conn, stmt)
+      end
+    end
+  end
+
+  defp checked_scalar_loop(conn, stmt, acc) do
+    case Exqlite.Sqlite3.step(conn, stmt) do
+      {:row, [value]} -> checked_scalar_loop(conn, stmt, [value | acc])
+      :done -> {:ok, Enum.reverse(acc)}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @spec upsert_issue(Exqlite.Sqlite3.db(), map()) :: {:ok, map()} | {:error, term()}

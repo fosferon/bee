@@ -1,6 +1,10 @@
 defmodule Bee.Export do
   @moduledoc false
 
+  # The export does not include `external_key` (or `metadata`): an issue newly
+  # inserted or reseeded from JSONL has no external key, while importing over an
+  # existing issue keeps its key.
+
   @spec export(Exqlite.Sqlite3.db(), String.t()) :: :ok
   def export(conn, path) do
     {:ok, issues} = Bee.Store.list_issues_raw(conn)
