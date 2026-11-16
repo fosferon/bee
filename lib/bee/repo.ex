@@ -670,15 +670,6 @@ defmodule Bee.Repo do
     end
   end
 
-  defp qualify_owner_write(%{lane_write_fence: false}, _request), do: :ok
-
-  defp qualify_owner_write(state, request) do
-    case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
-      {:ok, _} -> :ok
-      {:error, _} = error -> error
-    end
-  end
-
   defp handle_request({:register_project, id, attrs}, _from, state) do
     result =
       transaction(state.conn, fn ->
@@ -925,6 +916,15 @@ defmodule Bee.Repo do
   end
 
   # --- Helpers ---
+
+  defp qualify_owner_write(%{lane_write_fence: false}, _request), do: :ok
+
+  defp qualify_owner_write(state, request) do
+    case Bee.Store.LaneWriteFence.legacy_admission(state.conn, request, state.prefix) do
+      {:ok, _} -> :ok
+      {:error, _} = error -> error
+    end
+  end
 
   defp block_dependency(id, blocker_id, type, state) do
     full_id = resolve_id(id, state.prefix)
