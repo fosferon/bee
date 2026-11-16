@@ -307,7 +307,7 @@ defmodule Bee.Store.MigrateTest do
   test "migration 002 adds issues.metadata column with NOT NULL DEFAULT", %{conn: conn} do
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 9} = Migrate.user_version(conn)
+    assert {:ok, 10} = Migrate.user_version(conn)
     assert column_exists?(conn, "issues", "metadata")
     assert "TEXT" == column_type(conn, "issues", "metadata")
     assert "'{}'" == column_default(conn, "issues", "metadata")
@@ -321,7 +321,7 @@ defmodule Bee.Store.MigrateTest do
 
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 9} = Migrate.user_version(conn)
+    assert {:ok, 10} = Migrate.user_version(conn)
     assert table_exists?(conn, "events")
     assert column_exists?(conn, "events", "event_type")
     assert column_exists?(conn, "events", "payload")
@@ -411,7 +411,7 @@ defmodule Bee.Store.MigrateTest do
 
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
 
-    assert {:ok, 9} = Migrate.user_version(conn)
+    assert {:ok, 10} = Migrate.user_version(conn)
     assert 1 == scalar(conn, "SELECT COUNT(*) FROM dependencies")
     assert ["BEE-2"] == dependency_targets(conn, "BEE-1")
     assert index_exists?(conn, "idx_dependencies_reverse")
@@ -432,9 +432,9 @@ defmodule Bee.Store.MigrateTest do
              )
   end
 
-  test "full migration ladder reaches version 9 on a fresh database", %{conn: conn} do
+  test "full migration ladder reaches version 10 on a fresh database", %{conn: conn} do
     assert :ok = Migrate.run(conn, migrations: Migrate.migrations())
-    assert {:ok, 9} = Migrate.user_version(conn)
+    assert {:ok, 10} = Migrate.user_version(conn)
     assert table_exists?(conn, "lane_issue_links")
     assert table_exists?(conn, "lane_issue_receipts")
     assert table_exists?(conn, "lane_mutation_receipts")
@@ -445,6 +445,184 @@ defmodule Bee.Store.MigrateTest do
     assert table_exists?(conn, "intent_usage")
     assert index_exists?(conn, "idx_dependencies_reverse")
     assert column_exists?(conn, "issues", "metadata")
+    assert column_exists?(conn, "issues", "external_key")
+    assert index_exists?(conn, "idx_issues_external_key")
+  end
+
+  describe "migration 10: issues.external_key" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "bee_extkey_mig_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      %{dir: dir, path: Path.join(dir, "bee.db")}
+    end
+
+    test "migrates a populated version 9 database without touching its rows", %{
+      dir: dir,
+      path: path
+    } do
+      v9 = Enum.take(Migrate.migrations(), 9)
+      assert :ok = Migrate.run_at_boot(path, migrations: v9)
+
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      :ok = Bee.Store.configure_pragmas(conn)
+      assert {:ok, 9} = Migrate.user_version(conn)
+      refute column_exists?(conn, "issues", "external_key")
+      populate_v9(conn)
+      before = snapshot(conn)
+      Exqlite.Sqlite3.close(conn)
+
+      earlier_backups = backups(dir)
+      assert :ok = Migrate.run_at_boot(path)
+
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      assert {:ok, 10} = Migrate.user_version(conn)
+      assert column_exists?(conn, "issues", "external_key")
+      assert snapshot(conn) == before
+      assert 0 == scalar(conn, "SELECT COUNT(*) FROM issues WHERE external_key IS NOT NULL")
+      assert 3 == scalar(conn, "SELECT COUNT(*) FROM issues WHERE external_key IS NULL")
+
+      index_sql =
+        scalar(conn, "SELECT sql FROM sqlite_master WHERE name = 'idx_issues_external_key'")
+
+      assert index_sql =~ "UNIQUE INDEX"
+      assert index_sql =~ "WHERE external_key IS NOT NULL"
+      assert [1] == partial_flag(conn, "issues", "idx_issues_external_key")
+      Exqlite.Sqlite3.close(conn)
+
+      assert [backup] = backups(dir) -- earlier_backups
+      {:ok, backup_conn} = Exqlite.Sqlite3.open(backup)
+      assert {:ok, 9} = Migrate.user_version(backup_conn)
+      assert integrity_check?(backup_conn)
+      refute column_exists?(backup_conn, "issues", "external_key")
+      Exqlite.Sqlite3.close(backup_conn)
+
+      # A second boot is a no-op: no migration, no new backup.
+      assert :ok = Migrate.run_at_boot(path)
+      assert [^backup] = backups(dir) -- earlier_backups
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      assert {:ok, 10} = Migrate.user_version(conn)
+      assert snapshot(conn) == before
+      Exqlite.Sqlite3.close(conn)
+    end
+
+    test "a fresh database reaches version 10 and init_schema is then a no-op", %{path: path} do
+      assert :ok = Migrate.run_at_boot(path)
+
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      assert {:ok, 10} = Migrate.user_version(conn)
+      assert column_exists?(conn, "issues", "external_key")
+      schema = schema_sql(conn)
+
+      assert :ok = Bee.Store.init_schema(conn)
+      assert schema_sql(conn) == schema
+      assert {:ok, 10} = Migrate.user_version(conn)
+      Exqlite.Sqlite3.close(conn)
+    end
+
+    test "the 0.3.0 migration list refuses a version 10 database", %{path: path} do
+      assert :ok = Migrate.run_at_boot(path)
+
+      assert {:error, :version_ahead} =
+               Migrate.run_at_boot(path, migrations: Enum.take(Migrate.migrations(), 9))
+    end
+
+    test "a failed migration 10 rolls back and leaves the database at version 9", %{path: path} do
+      v9 = Enum.take(Migrate.migrations(), 9)
+      assert :ok = Migrate.run_at_boot(path, migrations: v9)
+
+      {10, name, run} = Migrate.migration_009()
+
+      failing =
+        v9 ++
+          [
+            {10, name,
+             fn conn ->
+               :ok = run.(conn)
+               {:error, :injected}
+             end}
+          ]
+
+      assert {:error, {:migration_failed, :add_issues_external_key, :injected}} =
+               Migrate.run_at_boot(path, migrations: failing)
+
+      {:ok, conn} = Exqlite.Sqlite3.open(path)
+      assert {:ok, 9} = Migrate.user_version(conn)
+      refute column_exists?(conn, "issues", "external_key")
+      refute index_exists?(conn, "idx_issues_external_key")
+      Exqlite.Sqlite3.close(conn)
+    end
+  end
+
+  defp populate_v9(conn) do
+    {:ok, metadata} = Bee.Store.Metadata.encode(%{"source" => "fixture"})
+
+    for {n, labels} <- [{1, ["bug", "ui"]}, {2, []}, {3, ["ops"]}] do
+      id = "BEE-#{n}"
+
+      {:ok, _} =
+        Bee.Store.insert_issue(conn, %{
+          id: id,
+          title: "Issue #{n}",
+          description: "Body #{n}",
+          labels: labels,
+          metadata: metadata
+        })
+
+      {:ok, _} =
+        Bee.Store.Events.record(conn, id, "issue.created", fields: %{id: id, title: "Issue #{n}"})
+
+      :ok = Bee.Store.insert_comment(conn, id, "Comment on #{n}", author: "tester")
+    end
+
+    Bee.Id.set(conn, "BEE", 3)
+  end
+
+  defp snapshot(conn) do
+    %{
+      issues: rows(conn, "SELECT * FROM issues ORDER BY id"),
+      labels: rows(conn, "SELECT issue_id, label FROM issue_labels ORDER BY issue_id, label"),
+      comments: rows(conn, "SELECT * FROM comments ORDER BY id"),
+      events: rows(conn, "SELECT * FROM events ORDER BY id"),
+      fts: scalar(conn, "SELECT COUNT(*) FROM issues_fts"),
+      counter: rows(conn, "SELECT * FROM id_counter ORDER BY prefix")
+    }
+    |> Map.update!(:issues, fn issues ->
+      # The migrated rows gain one trailing column; compare the original columns.
+      Enum.map(issues, fn {cols, row} ->
+        Enum.zip(cols, row) |> Enum.reject(&match?({"external_key", _}, &1))
+      end)
+    end)
+  end
+
+  defp rows(conn, sql) do
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(conn, sql)
+
+    try do
+      {:ok, cols} = Exqlite.Sqlite3.columns(conn, stmt)
+
+      Stream.repeatedly(fn -> Exqlite.Sqlite3.step(conn, stmt) end)
+      |> Enum.take_while(&match?({:row, _}, &1))
+      |> Enum.map(fn {:row, row} -> {cols, row} end)
+    after
+      Exqlite.Sqlite3.release(conn, stmt)
+    end
+  end
+
+  defp partial_flag(conn, table, index) do
+    conn
+    |> rows("PRAGMA index_list(#{table})")
+    |> Enum.flat_map(fn {cols, row} ->
+      entry = Map.new(Enum.zip(cols, row))
+      if entry["name"] == index, do: [entry["partial"]], else: []
+    end)
+  end
+
+  defp schema_sql(conn),
+    do: rows(conn, "SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+
+  defp backups(dir) do
+    Path.join([dir, "backups", "bee.db", "*.vacuum.bak"]) |> Path.wildcard() |> Enum.sort()
   end
 
   defp column_exists?(conn, table, column) do

@@ -98,7 +98,8 @@ defmodule Bee.Store.Migrate do
       migration_005(),
       migration_006(),
       migration_007(),
-      migration_008()
+      migration_008(),
+      migration_009()
     ]
 
   @spec migration_000() :: migration()
@@ -130,6 +131,27 @@ defmodule Bee.Store.Migrate do
     do:
       {9, :add_lane_mutation_receipts,
        fn conn -> execute(conn, Bee.Store.LaneMutation.schema()) end}
+
+  @spec migration_009() :: migration()
+  def migration_009, do: {10, :add_issues_external_key, &add_issues_external_key/1}
+
+  # Nullable and unbackfilled: existing rows keep NULL. The partial index makes the
+  # key unique among the rows that carry one, and rows without a key never index.
+  # The key's format is validated in Elixir, so a later format change needs no
+  # table rebuild.
+  defp add_issues_external_key(conn) do
+    [
+      "ALTER TABLE issues ADD COLUMN external_key TEXT",
+      "CREATE UNIQUE INDEX idx_issues_external_key ON issues(external_key) " <>
+        "WHERE external_key IS NOT NULL"
+    ]
+    |> Enum.reduce_while(:ok, fn sql, :ok ->
+      case execute(conn, sql) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   defp add_lane_issue_associations(conn) do
     [
