@@ -3,3 +3,5 @@
 ExUnit.configure(inspect_opts: [charlists: :as_lists])
 # `:perf` benchmarks are opt-in: `mix test --only perf`.
 ExUnit.start(exclude: [:perf])
+
+Code.require_file("support/baseline.exs", __DIR__)
