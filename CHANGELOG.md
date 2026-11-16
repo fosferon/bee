@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-16
+
+### Added
+
+- `:external_key` option on `create`: an optional caller-chosen key, unique among issues that
+  carry one, stored atomically with the issue and immutable afterwards. Creating with a key that
+  is already in use returns `{:error, :external_key_conflict}` and writes nothing.
+- `Bee.get_by_external_key/2` and the `{:get_by_external_key, key}` message: an ordered lookup on
+  the writer, returning `{:ok, issue}`, `{:error, :not_found}` or a store error. It is a read
+  under the lane write fence.
+- Schema migration 10: nullable `issues.external_key` with a partial unique index. Existing rows
+  are untouched.
+- With a non-nil `:external_key`, `create` writes labels strictly: each label must be a non-empty
+  string (`{:error, {:invalid_label, index}}`), and any database error while writing the issue, a
+  label or its creation event rolls the whole create back. Duplicate labels are still accepted.
+  Creates without a key, or with `external_key: nil`, behave exactly as in 0.3.0.
+- `update` refuses `:external_key` (`{:error, {:immutable_field, :external_key}}`).
+
+### Upgrade and downgrade
+
+- On first start, 0.3.1 migrates the database to schema version 10 after taking and verifying a
+  backup under `backups/` next to the database file.
+- Clients that talk to a 0.3.1 server over its message protocol keep working unchanged.
+- The 0.3.0 library refuses a database migrated by 0.3.1 with `{:error, :version_ahead}`. To
+  downgrade, restore the pre-migration backup. Restoring it loses every write made after the
+  migration, so a downgrade after real use means re-entering those writes, or upgrading forward
+  instead.
+- The JSONL export format is unchanged and does not include `external_key`. An issue newly
+  inserted or reseeded from JSONL has no external key; importing over an existing issue keeps its
+  key.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
